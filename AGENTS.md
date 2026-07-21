@@ -99,3 +99,17 @@ Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -UseBasicParsing
 - Flask路由装饰器顺序 → `@app.route` 在上,其他装饰器在下
 - `Settings` 结构体的 `columns`/`key_info`/`copy_header` 必须保持 `#[serde(skip)]`，否则会导致前后端同步污染
 - `loadColumnSettings` 的 `_version` 必须随 `COLUMNS` 定义变更同步递增
+
+### 文件清理规则
+- 用户明确要求清理过期/不需要文件时，**直接删除**，无需再次确认
+- 清理前先列出清单让用户确认，避免误删
+
+### 安全注意事项
+- `meituan_cookies.json` 和 `meituan_orders.db` 当前为明文存储
+- 如需加密，根据用户需求选择：轻度(Base64)、中度(AES+机器密钥)、重度(SQLCipher+密码启动)
+
+### 同步逻辑铁律（重要！）
+- 退款/撤销检测**只通过 API `description` 字段关键词判断**
+- **绝不**靠"API 未返回"推断退款状态（这是严重错误）
+- 快速同步 60秒/次（可调 5~3600秒），15分钟窗口
+- 深度同步 30分钟/次（固定），50小时窗口

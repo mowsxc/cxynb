@@ -283,7 +283,7 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);font-si
 .result-bar{padding:var(--space-2) var(--space-4);border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);font-size:var(--text-sm);color:var(--text-muted);flex-wrap:wrap}
 .result-bar .hl{color:var(--primary);font-weight:var(--font-semibold)}
 .result-bar .sum{color:var(--success);font-weight:var(--font-semibold)}
-/* 表格 - 按设计规范 */
+/* 表格 */
 .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:0 0 var(--radius-lg) var(--radius-lg);scrollbar-gutter:stable}
 table{width:100%;border-collapse:collapse;font-size:var(--text-sm);background:var(--card)}
 thead th{position:sticky;top:0;background:#f9fafb;padding:8px 10px;text-align:left;font-weight:var(--font-semibold);color:var(--text-muted);border-bottom:2px solid var(--border);white-space:nowrap;z-index:1}
@@ -291,10 +291,10 @@ thead th.sortable{cursor:pointer;user-select:none;-webkit-user-select:none}
 thead th.sortable:hover{color:var(--primary)}
 thead th .arrow{font-size:10px;margin-left:2px}
 td{padding:6px 10px;border-bottom:1px solid #f3f4f6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td.seq-cell{text-align:center;color:#999;font-size:11px{white-space:nowrap;padding:6px 8px}
+td.seq-cell{text-align:center;color:#999;font-size:11px;white-space:nowrap;padding:6px 8px}
 table.main{table-layout:auto;width:100%;min-width:0}
 table.main th,table.main td{overflow:hidden;text-overflow:ellipsis;max-width:300px}
-table.main td:first-child{max-width:350px;min-width:150px}
+table.main td.product-cell{max-width:350px;min-width:150px}
 /* 响应式 - 按设计规范 */
 /* 响应式 - 按设计规范 */
 @media(max-width:768px){
@@ -813,7 +813,7 @@ tr.refunded:hover td:first-child {
     <table class="main dash-table" id="dataTable">
       <thead><tr>
 		<th data-col-id="seq" style="text-align:center;color:#999">序号</th>
-        <th data-col-id="product_info" class="sortable" onclick="sortBy('product_info')" >交易快照 <span class="arrow" id="arrow-product_info"></span></th>
+        <th data-col-id="product_info" class="sortable product-cell" onclick="sortBy('product_info')" >交易快照 <span class="arrow" id="arrow-product_info"></span></th>
         <th data-col-id="product_type" class="sortable" onclick="sortBy('product_type')" >类型 <span class="arrow" id="arrow-product_type"></span></th>
         <th data-col-id="coupon_value" class="sortable" onclick="sortBy('coupon_value')" >券号 <span class="arrow" id="arrow-coupon_value"></span></th>
         <th data-col-id="sale_price" class="sortable" onclick="sortBy('sale_price')" >消费金额 <span class="arrow" id="arrow-sale_price"></span></th>
@@ -1773,7 +1773,7 @@ function renderTable(){
 		    const finText=fin>0?`<span style="background:#fff7ed;padding:2px 10px;border-radius:4px;font-weight:600" title="计算公式: 销售价 - 商家优惠金额 - 服务费7%">¥`+fin.toFixed(2)+`</span>`:'<span style="color:#ccc">—</span>';
 		    const cells=[];
 		    if(vis('seq')) cells.push('<td class="seq-cell">'+(start+i+1)+'</td>');
-		    if(vis('product_info')){const pi=row.product_info||'';const colaIcon=pi.includes('可乐')?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;margin-right:4px;vertical-align:text-bottom;color:#c2410c"><path d="M8 2h8v4H8z"></path><path d="M7 6h10l-1 4H8L7 6z"></path><path d="M8 10h8v10a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V10z"></path><line x1="10" y1="13" x2="10" y2="17"></line><line x1="14" y1="13" x2="14" y2="17"></line></svg>':'';cells.push('<td title="'+esc(pi)+'">'+colaIcon+esc(kc?getProductName(pi):pi)+'</td>');}
+		    if(vis('product_info')){const pi=row.product_info||'';const colaIcon=pi.includes('可乐')?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;margin-right:4px;vertical-align:text-bottom;color:#c2410c"><path d="M8 2h8v4H8z"></path><path d="M7 6h10l-1 4H8L7 6z"></path><path d="M8 10h8v10a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V10z"></path><line x1="10" y1="13" x2="10" y2="17"></line><line x1="14" y1="13" x2="14" y2="17"></line></svg>':'';cells.push('<td class="product-cell" title="'+esc(pi)+'">'+colaIcon+esc(kc?getProductName(pi):pi)+'</td>');}
 		    if(vis('product_type')) cells.push('<td>'+esc(row.product_type||'')+'</td>');
 		    if(vis('coupon_value')) cells.push('<td>'+esc(row.coupon_value||'')+'</td>');
 		    if(vis('sale_price')) cells.push('<td class="amount">'+fmtMoney(row.sale_price)+'</td>');
