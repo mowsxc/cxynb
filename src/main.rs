@@ -766,7 +766,7 @@ fn build_daily_breakdown(conn: &rusqlite::Connection, exe_dir: &str, start: &str
 
 static REFRESH_LOCK: AtomicBool = AtomicBool::new(false);
 static REFRESH_LOCK_TIME: Mutex<Option<Instant>> = Mutex::new(None);
-const SYNC_TIMEOUT: Duration = Duration::from_secs(300); // 5分钟超时自动释放
+const SYNC_TIMEOUT: Duration = Duration::from_secs(3600); // 1小时超时自动释放（首次同步需要较长时间）
 
 fn try_acquire_sync_lock() -> bool {
     // 检查是否已被占用
@@ -836,7 +836,7 @@ fn rust_refresh(exe_dir: &str, deep: bool) -> RefreshResponse {
     ).unwrap_or_else(|_| "2026-01-01 00:00:00".into());
     let _ = conn.close();
 
-    let mut start_ts = chrono::NaiveDateTime::parse_from_str(&latest, "%Y-%m-%d %H:%M:%S")
+    let start_ts = chrono::NaiveDateTime::parse_from_str(&latest, "%Y-%m-%d %H:%M:%S")
         .map(|dt| {
             use chrono::TimeZone;
             chrono::FixedOffset::east_opt(8 * 3600)
@@ -847,14 +847,20 @@ fn rust_refresh(exe_dir: &str, deep: bool) -> RefreshResponse {
 
     let lookback_ms = if deep { 50 * 3600 * 1000 } else { 15 * 60 * 1000 };
     let end_ts = chrono::Utc::now().timestamp_millis();
-    // 限制同步窗口不超过 lookback_ms
-    let min_start_ts = end_ts - lookback_ms;
-    if start_ts < min_start_ts {
-        start_ts = min_start_ts;
+    // 首次同步（数据库为空）从 2026-01-01 开始完整拉取
+    // 后续同步使用滑动窗口：往前推 lookback_ms，但不超过 48 小时（撤销时效）
+    let start_ts = if latest == "2026-01-01 00:00:00" {
+        // 数据库为空，从 2026-01-01 开始
+        start_ts
     } else {
-        // 已有订单时，往前推 1 小时（避免漏掉边界订单）
-        start_ts = start_ts.saturating_sub(3600 * 1000);
-    }
+        // 已有订单，使用滑动窗口
+        let min_start_ts = end_ts - lookback_ms;
+        if start_ts < min_start_ts {
+            min_start_ts
+        } else {
+            start_ts.saturating_sub(3600 * 1000)
+        }
+    };
     let api_url = "https://e.dianping.com/couponrecord/queryCouponRecordDetails?yodaReady=h5&csecplatform=4&csecversion=4.2.4";
 
     // 调用 Python 脚本执行同步

@@ -56,11 +56,13 @@ def main():
     all_records = []
     errors = []
     
-    MAX_SLICE_MS = 3 * 24 * 3600 * 1000
+    # 切片大小：1 天（API 响应最快，约 1 秒/请求）
+    MAX_SLICE_MS = 1 * 24 * 3600 * 1000  # 1 天
     current_start = start_ts
     
     while current_start < end_ts:
         current_end = min(current_start + MAX_SLICE_MS, end_ts)
+        slice_records = []
         
         for page in range(50):
             payload = {
@@ -88,14 +90,16 @@ def main():
             if not recs:
                 break
             
-            all_records.extend(recs)
+            slice_records.extend(recs)
             if (page + 1) * 100 >= record_sum:
                 break
             
-            time.sleep(0.3)
+            time.sleep(0.1)
         
         if errors:
             break
+        
+        all_records.extend(slice_records)
         current_start = current_end
     
     # 写入数据库
