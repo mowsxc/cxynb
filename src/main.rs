@@ -2122,6 +2122,14 @@ async fn main() -> std::io::Result<()> {
         .to_string_lossy()
         .to_string();
     let port = std::env::var("PORT").unwrap_or_else(|_| "8899".into());
+    
+    // 支持通过环境变量或命令行传入密码（自动化/预览用）
+    let pwd_override = std::env::var("MEITUAN_PWD").ok()
+        .or_else(|| {
+            let args: Vec<String> = std::env::args().collect();
+            args.iter().position(|a| a == "--password")
+                .and_then(|i| args.get(i + 1)).cloned()
+        });
 
     // 初始化日志系统
     init_logging(&exe_dir);
@@ -2143,19 +2151,49 @@ async fn main() -> std::io::Result<()> {
         let meta_path = password_meta_path();
         if !std::path::Path::new(&meta_path).exists() {
             // 首次使用，设置密码
-            let (password, meta) = setup_password();
+            let (password, meta) = if let Some(pwd) = &pwd_override {
+                // 自动化模式：使用预设密码
+                let recovery_key = generate_recovery_key();
+                let meta = PasswordMeta {
+                    hint: "自动化设置".into(),
+                    recovery_key,
+                    encrypted_cookies: None,
+                };
+                let meta_json = serde_json::to_string_pretty(&meta).unwrap();
+                std::fs::write(&meta_path, meta_json).unwrap();
+                (pwd.clone(), meta)
+            } else {
+                setup_password()
+            };
             use base64::{Engine as _, engine::general_purpose::STANDARD};
             let salt = crate::crypto::random_bytes::<16>();
             let key = derive_key(&password, &salt);
-            // 初始化元数据（不包含加密 Cookie）
-            let meta_json = serde_json::to_string_pretty(&meta).unwrap();
-            std::fs::write(&meta_path, meta_json).unwrap();
             key
         } else {
             // 验证密码
-            let meta_json = std::fs::read_to_string(&meta_path).unwrap();
-            let meta: PasswordMeta = serde_json::from_str(&meta_json).unwrap();
-            verify_password(&meta)
+            if let Some(pwd) = &pwd_override {
+                use base64::{Engine as _, engine::general_purpose::STANDARD};
+                let meta_json = std::fs::read_to_string(&meta_path).unwrap();
+                let meta: PasswordMeta = serde_json::from_str(&meta_json).unwrap();
+                if let Some(encrypted) = &meta.encrypted_cookies {
+                    let salt = STANDARD.decode(&encrypted.salt).unwrap();
+                    let key = derive_key(&pwd, &salt);
+                    if decrypt(encrypted, &key).is_ok() {
+                        key
+                    } else {
+                        println!("❌ 环境变量密码错误");
+                        std::process::exit(1);
+                    }
+                } else {
+                    // 没有加密 Cookie，用 salt 派生（首次设置但 meta 文件存在）
+                    let salt = crate::crypto::random_bytes::<16>();
+                    derive_key(&pwd, &salt)
+                }
+            } else {
+                let meta_json = std::fs::read_to_string(&meta_path).unwrap();
+                let meta: PasswordMeta = serde_json::from_str(&meta_json).unwrap();
+                verify_password(&meta)
+            }
         }
     };
 
@@ -2194,7 +2232,7 @@ async fn main() -> std::io::Result<()> {
      let enc_key_hex = key.iter().map(|b| format!("{:02x}", b)).collect::<String>();
      let manager = SqliteConnectionManager::file(format!("{}/meituan_orders.db", exe_dir))
          .with_init(move |conn| {
-             conn.execute(&format!("PRAGMA key = \"x'{}'\";", enc_key_hex), [])
+             conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", enc_key_hex))
                  .map(|_| ())
          });
     let pool = Pool::builder()
