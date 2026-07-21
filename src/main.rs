@@ -1102,6 +1102,87 @@ async fn handle_put_settings(_state: web::Data<AppState>, body: web::Json<Settin
     }
 }
 
+/// 校验 Cookie 是否有效：读取文件后调用美团 API 测试
+fn validate_cookies() -> serde_json::Value {
+    let cookie_path = res_path("meituan_cookies.json");
+    let content = match std::fs::read_to_string(&cookie_path) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({"valid": false, "message": format!("读取 Cookie 文件失败: {}", e)}),
+    };
+
+    let cookie_str = match serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+        Ok(arr) => arr.iter()
+            .filter_map(|c| {
+                let name = c.get("name")?.as_str()?;
+                let value = c.get("value")?.as_str()?;
+                Some(format!("{}={}", name, value))
+            }).collect::<Vec<_>>().join("; "),
+        Err(e) => return serde_json::json!({"valid": false, "message": format!("Cookie JSON 解析失败: {}", e)}),
+    };
+
+    if cookie_str.is_empty() {
+        return serde_json::json!({"valid": false, "message": "Cookie 为空，请重新粘贴"});
+    }
+
+    // 调用美团 API 测试（只拉取一页，最近 1 天）
+    let api_url = "https://e.dianping.com/couponrecord/queryCouponRecordDetails?yodaReady=h5&csecplatform=4&csecversion=4.2.4";
+    let end_ts = chrono::Utc::now().timestamp_millis();
+    let start_ts = end_ts - 24 * 3600 * 1000;
+    let payload = serde_json::json!({
+        "dealGroupIds":"","bussinessType":0,"shopIds":"0","productTabNum":1,
+        "offset": 0, "limit": 10,
+        "beginDate": start_ts, "endDate": end_ts,
+        "subTabNum": null, "isConsumeMedical": false
+    });
+
+    let config = ureq::config::Config::builder()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+
+    match agent.post(api_url)
+        .header("User-Agent", "Mozilla/5.0")
+        .header("Content-Type", "application/json")
+        .header("Origin", "https://e.dianping.com")
+        .header("Referer", "https://e.dianping.com/app/np-mer-voucher-web-static/records")
+        .header("Cookie", &cookie_str)
+        .send_json(&payload)
+    {
+        Ok(mut resp) => {
+            let data: serde_json::Value = match resp.body_mut().read_json() {
+                Ok(d) => d,
+                Err(e) => return serde_json::json!({"valid": false, "message": format!("API 响应解析失败: {}", e)}),
+            };
+
+            // 检查是否有 data 字段
+            if let Some(d) = data.get("data").and_then(|v| v.as_object()) {
+                let record_sum = d.get("recordSum").and_then(|v| v.as_i64()).unwrap_or(0);
+                serde_json::json!({
+                    "valid": true,
+                    "message": format!("Cookie 有效！最近 1 天共有 {} 条核销记录", record_sum),
+                    "recordSum": record_sum
+                })
+            } else if let Some(msg) = data.get("msg").and_then(|v| v.as_str()) {
+                serde_json::json!({"valid": false, "message": format!("美团返回: {}", msg)})
+            } else {
+                serde_json::json!({"valid": false, "message": "API 响应格式异常，Cookie 可能已过期"})
+            }
+        }
+        Err(e) => {
+            let msg = format!("{:?}", e);
+            if msg.contains("401") || msg.contains("403") {
+                serde_json::json!({"valid": false, "message": format!("Cookie 已过期（HTTP {}），请在浏览器重新登录美团商家后台后重新提取", msg)})
+            } else {
+                serde_json::json!({"valid": false, "message": format!("API 请求失败: {}", e)})
+            }
+        }
+    }
+}
+
+async fn handle_validate_cookies() -> HttpResponse {
+    json_ok(validate_cookies())
+}
+
 
 // ═══════════════════════════════════════════════════════════════════
 //  Cookie 登录工具
@@ -2150,6 +2231,7 @@ async fn main() -> std::io::Result<()> {
 	            .route("/api/refresh", web::get().to(handle_refresh))
             .route("/api/settings", web::get().to(handle_get_settings))
             .route("/api/settings", web::put().to(handle_put_settings))
+            .route("/api/cookie/validate", web::get().to(handle_validate_cookies))
 	    })
 	    .workers(4)
 	    .bind(format!("0.0.0.0:{}", port))

@@ -2186,10 +2186,24 @@ async function loginWithCookies(){
       })
     });
     if (!resp.ok) throw new Error('保存失败 (HTTP ' + resp.status + ')');
-    document.getElementById('loginOverlay').style.display = 'none';
-    showToast('Cookie 已保存，正在同步订单数据', 'success');
-    fetch(API+'/api/refresh?deep=1').catch(()=>{});
-    setTimeout(() => location.reload(), 2500);
+    showToast('Cookie 已保存，正在校验有效性...', 'success');
+    // 调用后端校验接口验证 Cookie 是否有效
+    try {
+      const valResp = await fetch(API+'/api/cookie/validate');
+      const valData = await valResp.json();
+      if (valData.valid) {
+        showToast(valData.message, 'success');
+        document.getElementById('loginOverlay').style.display = 'none';
+        fetch(API+'/api/refresh?deep=1').catch(()=>{});
+        setTimeout(() => location.reload(), 2500);
+      } else {
+        errEl.textContent = '校验失败: ' + valData.message;
+        errEl.style.display = 'block';
+      }
+    } catch(valErr) {
+      errEl.textContent = '校验请求失败: ' + valErr.message;
+      errEl.style.display = 'block';
+    }
   } catch(e) {
     errEl.textContent = '提交失败: ' + e.message;
     errEl.style.display = 'block';
