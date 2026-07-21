@@ -46,7 +46,7 @@
 
 *{box-sizing:border-box;margin:0}
 body{font-family:var(--font-sans);background:var(--bg);color:var(--text);font-size:var(--text-base);line-height:1.5}
-.wrap{max-width:1500px;margin:0 auto;padding:var(--space-3) var(--space-4)}
+.wrap{max-width:100%;margin:0 auto;padding:var(--space-3) var(--space-4)}
 .panel{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm)}
 .bar {
   display: flex;
@@ -284,8 +284,8 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);font-si
 .result-bar .hl{color:var(--primary);font-weight:var(--font-semibold)}
 .result-bar .sum{color:var(--success);font-weight:var(--font-semibold)}
 /* 表格 - 按设计规范 */
-.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:0 0 var(--radius-lg) var(--radius-lg)}
-table{width:100%;border-collapse:collapse;font-size:var(--text-sm);background:var(--card);min-width:1100px}
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:0 0 var(--radius-lg) var(--radius-lg);scrollbar-gutter:stable}
+table{width:100%;border-collapse:collapse;font-size:var(--text-sm);background:var(--card)}
 thead th{position:sticky;top:0;background:#f9fafb;padding:8px 10px;text-align:left;font-weight:var(--font-semibold);color:var(--text-muted);border-bottom:2px solid var(--border);white-space:nowrap;z-index:1}
 thead th.sortable{cursor:pointer;user-select:none;-webkit-user-select:none}
 thead th.sortable:hover{color:var(--primary)}
