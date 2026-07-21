@@ -153,12 +153,15 @@ def main():
         
         conn.commit()
     
-    # 检查撤销订单
+    # 检查撤销订单（只对超过 48 小时的订单执行，避免 API 返回不稳定导致误判）
     now_ts = int(time.time() * 1000)
-    start_dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_ts / 1000))
+    # 48 小时前的时间戳（API 只保证返回 48 小时内的数据）
+    reliable_ts = now_ts - 48 * 3600 * 1000
+    reliable_dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(reliable_ts / 1000))
+    # 只查询 48 小时前的订单
     rows = conn.execute(
-        "SELECT coupon_value, consume_date FROM orders WHERE consume_date >= ? AND is_refunded = 0",
-        (start_dt,)
+        "SELECT coupon_value, consume_date FROM orders WHERE consume_date >= ? AND consume_date < ? AND is_refunded = 0",
+        (start_dt, reliable_dt)
     ).fetchall()
     
     api_coupon_set = {r.get('couponValue', '') for r in all_records}
@@ -168,6 +171,7 @@ def main():
         if coupon not in api_coupon_set:
             try:
                 order_ts = int(time.mktime(time.strptime(consume_date, '%Y-%m-%d %H:%M:%S')) * 1000)
+                # 超过 2 分钟的订单才标记为撤销（避免新订单尚未同步完成）
                 if now_ts - order_ts > 120000:
                     conn.execute(
                         "UPDATE orders SET is_refunded=1, description='[已撤销]' WHERE coupon_value=?",
@@ -176,6 +180,19 @@ def main():
                     revoked_count += 1
             except:
                 pass
+    
+    # 对于 48 小时内的订单，如果之前被错误标记为撤销但 API 返回了，恢复为正常
+    if api_coupon_set:
+        placeholders = ','.join(['?'] * len(api_coupon_set))
+        conn.execute(f"""
+            UPDATE orders SET is_refunded = 0, description = ''
+            WHERE is_refunded = 1 AND description = '[已撤销]'
+            AND consume_date >= ?
+            AND coupon_value IN ({placeholders})
+        """, [reliable_dt] + list(api_coupon_set))
+        recovered = conn.total_changes
+    else:
+        recovered = 0
     
     conn.commit()
     conn.close()
