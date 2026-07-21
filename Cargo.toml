@@ -12,7 +12,7 @@ rand = "0.9"
 actix-web = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 chrono = "0.4"
@@ -21,6 +21,10 @@ env_logger = "0.11"
 tungstenite = "0.29.0"
 url = "2.5.8"
 tokio = { version = "1", features = ["rt", "time"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+rpassword = "7"
 ureq = { version = "3.3.0", features = ["json", "native-tls"] }
 
 [target.'cfg(windows)'.dependencies]

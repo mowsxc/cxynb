@@ -1,5 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod crypto;
+
 use actix_web::{web, App, HttpServer, HttpResponse};
 use chrono::{Datelike, Local};
 use log::{info, warn};
@@ -15,6 +17,141 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+
+use crate::crypto::{EncryptedData, derive_key, encrypt, decrypt, generate_recovery_key};
+
+/// 密码提示符文件路径（存储密码提示和加密元数据）
+fn password_meta_path() -> String {
+    res_path("meituan.meta.json")
+}
+
+/// 密码元数据
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct PasswordMeta {
+    /// 密码提示（用户设置的）
+    hint: String,
+    /// 恢复密钥
+    recovery_key: String,
+    /// Cookie 文件的加密数据（用于验证密码）
+    encrypted_cookies: Option<EncryptedData>,
+}
+
+/// 提示用户输入密码（隐藏输入）
+fn prompt_password(prompt: &str) -> String {
+    println!("\n{}", prompt);
+    print!("> ");
+    std::io::stdout().flush().unwrap();
+    rpassword::read_password().unwrap_or_default()
+}
+
+/// 首次设置密码
+fn setup_password() -> (String, PasswordMeta) {
+    println!("\n{}", "═".repeat(50));
+    println!("  🔐 首次使用，请设置主密码");
+    println!("{}", "═".repeat(50));
+    println!();
+    println!("  ⚠️  主密码用于加密您的 Cookie 和订单数据");
+    println!("  ⚠️  忘记密码将导致数据永久不可恢复");
+    println!("  ⚠️  请使用 12 位以上复杂密码");
+    println!();
+    
+    let password = prompt_password("请输入主密码（≥12 位）:");
+    if password.len() < 12 {
+        println!("❌ 密码太短，至少需要 12 位");
+        std::process::exit(1);
+    }
+    
+    let confirm = prompt_password("请再次输入主密码确认:");
+    if password != confirm {
+        println!("❌ 两次输入的密码不一致");
+        std::process::exit(1);
+    }
+    
+    println!();
+    print!("请输入密码提示（可选，用于提醒自己）: ");
+    std::io::stdout().flush().unwrap();
+    let mut hint = String::new();
+    std::io::stdin().read_line(&mut hint).unwrap();
+    let hint = hint.trim().to_string();
+    
+    let recovery_key = generate_recovery_key();
+    
+    println!();
+    println!("  🔑 恢复密钥（请妥善保存）:");
+    println!("  ┌──────────────────────────────────────────┐");
+    println!("  │  {:<40} │", recovery_key);
+    println!("  └──────────────────────────────────────────┘");
+    println!();
+    println!("  ⚠️  恢复密钥用于忘记主密码时重置");
+    println!("  ⚠️  请打印或保存到密码管理器");
+    println!("  ⚠️  丢失密钥+忘记密码 = 数据永久丢失");
+    println!();
+    println!("按 Enter 继续...");
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).unwrap();
+    
+    let meta = PasswordMeta {
+        hint,
+        recovery_key,
+        encrypted_cookies: None,
+    };
+    
+    // 保存元数据
+    let meta_json = serde_json::to_string_pretty(&meta).unwrap();
+    std::fs::write(password_meta_path(), meta_json).unwrap();
+    
+    (password, meta)
+}
+
+/// 验证密码并获取密钥
+fn verify_password(meta: &PasswordMeta) -> [u8; 32] {
+    let prompt = if meta.hint.is_empty() {
+        "请输入主密码:".to_string()
+    } else {
+        format!("请输入主密码（提示: {}）:", meta.hint)
+    };
+    let password = prompt_password(&prompt);
+    
+    if let Some(encrypted) = &meta.encrypted_cookies {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let salt = STANDARD.decode(&encrypted.salt).unwrap();
+        let key = derive_key(&password, &salt);
+        if decrypt(encrypted, &key).is_ok() {
+            return key;
+        }
+    }
+    
+    println!("❌ 密码错误");
+    std::process::exit(1);
+}
+
+/// 加密保存 Cookie 文件
+fn save_encrypted_cookies(cookies_json: &str, key: &[u8; 32], meta: &mut PasswordMeta) {
+    let encrypted = encrypt(cookies_json.as_bytes(), key);
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    
+    // 保存加密后的 Cookie
+    let enc_json = serde_json::to_string_pretty(&encrypted).unwrap();
+    std::fs::write(res_path("meituan_cookies.enc"), enc_json).unwrap();
+    
+    // 更新元数据
+    meta.encrypted_cookies = Some(encrypted.clone());
+    let meta_json = serde_json::to_string_pretty(meta).unwrap();
+    std::fs::write(password_meta_path(), meta_json).unwrap();
+}
+
+/// 解密 Cookie 文件
+fn load_decrypted_cookies(meta: &PasswordMeta, key: &[u8; 32]) -> String {
+    let enc_path = res_path("meituan_cookies.enc");
+    if !std::path::Path::new(&enc_path).exists() {
+        return String::new();
+    }
+    
+    let enc_json = std::fs::read_to_string(&enc_path).unwrap();
+    let encrypted: EncryptedData = serde_json::from_str(&enc_json).unwrap();
+    let decrypted = decrypt(&encrypted, key).unwrap();
+    String::from_utf8(decrypted).unwrap()
+}
 use std::time::Instant;
 
 // This will be removed - the frontend now doesn't call query() on init
@@ -305,6 +442,8 @@ pub struct AppState {
     pub cookie_file: String,
     pub html_dir: String,
     pub exe_dir: String,
+    /// 加密密钥（运行时从密码派生）
+    pub enc_key: [u8; 32],
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -335,7 +474,7 @@ fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<(), Box<dyn std::erro
         CREATE INDEX IF NOT EXISTS idx_coupon_value ON orders(coupon_value);
         CREATE INDEX IF NOT EXISTS idx_is_refunded ON orders(is_refunded);"
     )?;
-    info!("数据库初始化完成");
+    info!("数据库初始化完成（SQLCipher 加密）");
     Ok(())
 }
 
@@ -398,7 +537,7 @@ async fn handle_logo(state: web::Data<AppState>) -> HttpResponse {
 }
 
 async fn handle_health(state: web::Data<AppState>) -> HttpResponse {
-    let cookie_ok = std::path::Path::new(&state.cookie_file).exists();
+    let cookie_ok = std::path::Path::new(&enc_cookie_path()).exists();
     match state.db.get() {
         Ok(conn) => {
             let total = db_total(&conn);
@@ -958,11 +1097,10 @@ fn normalize_settings(s: &mut Settings) {
     s.refresh_interval_secs = s.refresh_interval_secs.clamp(5, 3600);
 }
 
-fn save_settings(s: &Settings) -> Result<(), String> {
-    // 如果前端更新了 cookie_raw 且非空，直接同步写回后端 meituan_cookies.json
+fn save_settings(s: &Settings, enc_key: &[u8; 32]) -> Result<(), String> {
+    // 如果前端更新了 cookie_raw 且非空，加密写回
     if !s.cookie_raw.trim().is_empty() {
-        let cookie_path = res_path("meituan_cookies.json");
-        std::fs::write(&cookie_path, &s.cookie_raw).map_err(|e| format!("Cookie 写入失败: {}", e))?;
+        write_encrypted_cookies(&s.cookie_raw, enc_key)?;
     }
 
     let mut persisted = s.clone();
@@ -980,21 +1118,50 @@ async fn handle_get_settings(_state: web::Data<AppState>) -> HttpResponse {
     json_ok(s)
 }
 
-async fn handle_put_settings(_state: web::Data<AppState>, body: web::Json<Settings>) -> HttpResponse {
-    match save_settings(&body.into_inner()) {
+async fn handle_put_settings(state: web::Data<AppState>, body: web::Json<Settings>) -> HttpResponse {
+    match save_settings(&body.into_inner(), &state.enc_key) {
         Ok(()) => json_ok(serde_json::json!({"ok":true})),
         Err(e) => json_err(e),
     }
 }
 
-/// 校验 Cookie 是否有效：读取文件后调用美团 API 测试
-fn validate_cookies() -> serde_json::Value {
-    let cookie_path = res_path("meituan_cookies.json");
-    let content = match std::fs::read_to_string(&cookie_path) {
-        Ok(c) => c,
-        Err(e) => return serde_json::json!({"valid": false, "message": format!("读取 Cookie 文件失败: {}", e)}),
-    };
+/// 加密的 Cookie 文件路径
+fn enc_cookie_path() -> String {
+    res_path("meituan_cookies.enc")
+}
 
+/// 读取并解密 Cookie 文件（返回 JSON 字符串）
+fn read_encrypted_cookies(key: &[u8; 32]) -> Result<String, String> {
+    let path = enc_cookie_path();
+    if !std::path::Path::new(&path).exists() {
+        return Ok(String::new());
+    }
+    let enc_json = std::fs::read_to_string(&path).map_err(|e| format!("读取加密 Cookie 失败: {}", e))?;
+    let encrypted: crate::crypto::EncryptedData = serde_json::from_str(&enc_json).map_err(|e| format!("解析加密数据失败: {}", e))?;
+    let decrypted = crate::crypto::decrypt(&encrypted, key).map_err(|e| format!("解密失败: {}", e))?;
+    String::from_utf8(decrypted).map_err(|e| format!("UTF-8 解码失败: {}", e))
+}
+
+/// 加密并保存 Cookie 文件
+fn write_encrypted_cookies(content: &str, key: &[u8; 32]) -> Result<(), String> {
+    let encrypted = crate::crypto::encrypt(content.as_bytes(), key);
+    let enc_json = serde_json::to_string_pretty(&encrypted).map_err(|e| format!("序列化失败: {}", e))?;
+    std::fs::write(enc_cookie_path(), enc_json).map_err(|e| format!("写入加密 Cookie 失败: {}", e))?;
+    // 删除旧的明文文件（如果存在）
+    let plain_path = res_path("meituan_cookies.json");
+    if std::path::Path::new(&plain_path).exists() {
+        let _ = std::fs::remove_file(&plain_path);
+    }
+    Ok(())
+}
+
+/// 校验 Cookie 是否有效：读取加密文件后调用美团 API 测试
+fn validate_cookies(enc_key: &[u8; 32]) -> serde_json::Value {
+    let content = match read_encrypted_cookies(enc_key) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({"valid": false, "message": e}),
+    };
+    
     let cookie_str = match serde_json::from_str::<Vec<serde_json::Value>>(&content) {
         Ok(arr) => arr.iter()
             .filter_map(|c| {
@@ -1069,8 +1236,8 @@ fn validate_cookies() -> serde_json::Value {
     }
 }
 
-async fn handle_validate_cookies() -> HttpResponse {
-    json_ok(validate_cookies())
+async fn handle_validate_cookies(state: web::Data<AppState>) -> HttpResponse {
+    json_ok(validate_cookies(&state.enc_key))
 }
 
 
@@ -1971,6 +2138,27 @@ async fn main() -> std::io::Result<()> {
 
     let dir = exe_dir.clone();
 
+    // 🔐 密码验证（首次设置或登录）
+    let key = {
+        let meta_path = password_meta_path();
+        if !std::path::Path::new(&meta_path).exists() {
+            // 首次使用，设置密码
+            let (password, meta) = setup_password();
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+            let salt = crate::crypto::random_bytes::<16>();
+            let key = derive_key(&password, &salt);
+            // 初始化元数据（不包含加密 Cookie）
+            let meta_json = serde_json::to_string_pretty(&meta).unwrap();
+            std::fs::write(&meta_path, meta_json).unwrap();
+            key
+        } else {
+            // 验证密码
+            let meta_json = std::fs::read_to_string(&meta_path).unwrap();
+            let meta: PasswordMeta = serde_json::from_str(&meta_json).unwrap();
+            verify_password(&meta)
+        }
+    };
+
     // 检查已有实例
     match check_existing_instance(&port) {
         Some(false) => {
@@ -2001,15 +2189,20 @@ async fn main() -> std::io::Result<()> {
         println!("         └─ ⚠️  Cookie 缺失。首次使用请确保已登录美团商家后台");
     }
 
-    println!("");
-    println!("  📋 [2/4] 初始化数据库...");
-    let manager = SqliteConnectionManager::file(format!("{}/meituan_orders.db", exe_dir));
+     println!("");
+     println!("  📋 [2/4] 初始化数据库...");
+     let enc_key_hex = key.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+     let manager = SqliteConnectionManager::file(format!("{}/meituan_orders.db", exe_dir))
+         .with_init(move |conn| {
+             conn.execute(&format!("PRAGMA key = \"x'{}'\";", enc_key_hex), [])
+                 .map(|_| ())
+         });
     let pool = Pool::builder()
         .max_size(8)
         .connection_timeout(Duration::from_secs(5))
         .build(manager)
         .expect("数据库连接池初始化失败");
-    init_db(&pool).expect("数据库表初始化失败");
+    init_db(&pool).expect("数据库表初始化完成");
     let conn = pool.get().expect("获取数据库连接失败");
     let total = db_total(&conn);
     let refunded = db_refunded(&conn);
@@ -2019,7 +2212,7 @@ async fn main() -> std::io::Result<()> {
 
     println!("");
     println!("  📋 [3/4] 检查配置文件...");
-    let cookie_ok = std::path::Path::new(&format!("{}/meituan_cookies.json", exe_dir)).exists();
+    let cookie_ok = std::path::Path::new(&enc_cookie_path()).exists();
     println!("         └─ Cookie 凭证: {}", if cookie_ok { "✅" } else { "⚠️ 缺失" });
     if std::path::Path::new(&format!("{}/settings.json", exe_dir)).exists() {
         let s = load_settings();
@@ -2034,9 +2227,10 @@ async fn main() -> std::io::Result<()> {
 
     let state = web::Data::new(AppState {
         db: pool.clone(),
-        cookie_file: format!("{}/meituan_cookies.json", exe_dir),
+        cookie_file: enc_cookie_path(),
         html_dir: dir.clone(),
         exe_dir: exe_dir.clone(),
+        enc_key: key,
     });
 
 		    // 自动更新任务：按 settings.json 中的刷新间隔拉取新数据 (使用 15分钟 短查找窗口快速同步最新核销与撤销状态)
