@@ -291,7 +291,7 @@ thead th.sortable{cursor:pointer;user-select:none;-webkit-user-select:none}
 thead th.sortable:hover{color:var(--primary)}
 thead th .arrow{font-size:10px;margin-left:2px}
 td{padding:6px 10px;border-bottom:1px solid #f3f4f6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td.seq-cell{text-align:center;color:#999;font-size:11px;width:48px;min-width:48px;max-width:48px;padding:6px 4px}
+td.seq-cell{text-align:center;color:#999;font-size:11px{white-space:nowrap;padding:6px 8px}
 table.main{table-layout:auto;width:100%;min-width:0}
 table.main th,table.main td{overflow:hidden;text-overflow:ellipsis;max-width:300px}
 table.main td:first-child{max-width:350px;min-width:150px}
@@ -812,13 +812,13 @@ tr.refunded:hover td:first-child {
   <div class="table-wrap">
     <table class="main dash-table" id="dataTable">
       <thead><tr>
-		<th data-col-id="seq" style="width:48px;min-width:48px;max-width:48px;text-align:center;color:#999">序号</th>
+		<th data-col-id="seq" style="text-align:center;color:#999">序号</th>
         <th data-col-id="product_info" class="sortable" onclick="sortBy('product_info')" >交易快照 <span class="arrow" id="arrow-product_info"></span></th>
         <th data-col-id="product_type" class="sortable" onclick="sortBy('product_type')" >类型 <span class="arrow" id="arrow-product_type"></span></th>
         <th data-col-id="coupon_value" class="sortable" onclick="sortBy('coupon_value')" >券号 <span class="arrow" id="arrow-coupon_value"></span></th>
         <th data-col-id="sale_price" class="sortable" onclick="sortBy('sale_price')" >消费金额 <span class="arrow" id="arrow-sale_price"></span></th>
         <th data-col-id="discount_price">商家优惠</th>
-        <th data-col-id="consume_date" class="sortable" onclick="sortBy('consume_date')" >消费时间 <span class="arrow" id="arrow-consume_date">▼</span></th>
+        <th data-col-id="consume_date" class="sortable" onclick="sortBy('consume_date')" >消费时间 <span class="arrow" id="arrow-consume_date"></span></th>
         <th data-col-id="mobile" class="sortable" onclick="sortBy('mobile')" >用户手机 <span class="arrow" id="arrow-mobile"></span></th>
         <th data-col-id="description">备注</th>
         <th data-col-id="shop_info">门店</th>
@@ -1144,6 +1144,7 @@ function loadColumnSettings(){
 }
 let columnSettings = loadColumnSettings();
 function isColVisible(id){
+  if (id === 'seq') return true; // 系统列始终可见
   const col = columnSettings.columns.find(x => x.id === id);
   return col ? col.vis !== false : true;
 }
@@ -1384,7 +1385,7 @@ function renderColumnChecks(){
   const box=document.getElementById('columnSettingsTable');
   if(!box)return;
   const hints={
-    product_info:'套餐名称和交易快照，识别订单最关键。', product_type:'团购、代金券等订单类型。',
+    seq:'订单序号，方便对账定位。', product_info:'套餐名称和交易快照，识别订单最关键。', product_type:'团购、代金券等订单类型。',
     coupon_value:'纯净券号，复制对账最常用。', sale_price:'美团原始消费金额。',
     discount_price:'商家优惠和活动补贴明细。', consume_date:'核销时间，排班和对账依据。',
     mobile:'用户手机号，页面默认脱敏。', description:'退款、撤销和其他备注。',
@@ -1394,16 +1395,19 @@ function renderColumnChecks(){
   box.innerHTML=COLUMNS.map(c=>{
     const colCfg=columnSettings.columns.find(x=>x.id===c.id) || {vis:true, copy:true};
     const forcedSafe = c.id === 'fee' || c.id === 'financial';
+    const isSystem = c.system === true;
     const visChk=colCfg.vis!==false?'checked':'';
     const copyChk=(!forcedSafe && colCfg.copy!==false)?'checked':'';
+    const visDisabled = isSystem ? 'disabled' : '';
+    const visTitle = isSystem ? '系统列，始终显示' : '页面显示 '+c.label;
     return `
     <div class="column-row">
       <div>
-        <div class="column-title">${c.label}</div>
+        <div class="column-title">${c.label}${isSystem?' <span style="font-size:9px;color:#999">(系统列)</span>':''}</div>
         <div class="column-desc ${forcedSafe?'column-safe':''}">${hints[c.id]||''}</div>
       </div>
       <div style="display:flex;justify-content:center">
-        <input type="checkbox" class="ios-switch" data-col-vis="${c.id}" ${visChk} title="页面显示 ${c.label}" onchange="previewSettings()">
+        <input type="checkbox" class="ios-switch" data-col-vis="${c.id}" ${visChk} ${visDisabled} title="${visTitle}" onchange="previewSettings()">
       </div>
       <div style="display:flex;justify-content:center">
         <input type="checkbox" class="ios-switch" data-col-copy="${c.id}" ${copyChk} ${forcedSafe?'disabled':''} title="复制/导出 ${c.label}" onchange="previewSettings()">
