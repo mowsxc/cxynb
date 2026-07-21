@@ -2154,6 +2154,7 @@ async fn main() -> std::io::Result<()> {
             let (password, meta) = if let Some(pwd) = &pwd_override {
                 // 自动化模式：使用预设密码
                 let recovery_key = generate_recovery_key();
+                println!("\n  🔑 恢复密钥（请妥善保存）: {}", recovery_key);
                 let meta = PasswordMeta {
                     hint: "自动化设置".into(),
                     recovery_key,
