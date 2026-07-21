@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>美团对账同步系统 - 偏好与系统设置</title>
+  <style>
+    :root {
+      --bg-base: #0f111a;
+      --bg-panel: #161925;
+      --bg-input: #1f2335;
+      --border: rgba(255,255,255,0.08);
+      --text-main: #f8f9fa;
+      --text-muted: #a0aec0;
+      --accent: #ffb703;
+      --accent-hover: #fb8500;
+      --success: #2ec4b6;
+      --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      background: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-family);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    
+    .container {
+      background: var(--bg-panel);
+      width: 100%;
+      max-width: 600px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    
+    h2 {
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+    }
+    
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+    }
+    
+    .card {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    
+    .form-group:last-child {
+      margin-bottom: 0;
+    }
+    
+    label {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    
+    input[type="text"], textarea {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: var(--text-main);
+      font-size: 13px;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    
+    input[type="text"]:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(255, 183, 3, 0.2);
+    }
+    
+    textarea {
+      font-family: monospace;
+      font-size: 11px;
+      resize: vertical;
+    }
+    
+    .row {
+      display: flex;
+      gap: 12px;
+    }
+    
+    .row .form-group {
+      flex: 1;
+    }
+    
+    /* Switch component */
+    .switch-group {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    
+    .switch-group:last-child {
+      margin-bottom: 0;
+    }
+    
+    .switch-label {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    
+    .switch-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+    
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: var(--bg-input);
+      border: 1px solid var(--border);
+      transition: .3s;
+      border-radius: 24px;
+    }
+    
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: var(--text-muted);
+      transition: .3s;
+      border-radius: 50%;
+    }
+    
+    input:checked + .slider {
+      background-color: var(--accent);
+      border-color: var(--accent);
+    }
+    
+    input:checked + .slider:before {
+      transform: translateX(20px);
+      background-color: var(--bg-base);
+    }
+    
+    .btn-group {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 10px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }
+    
+    .btn {
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: none;
+    }
+    
+    .btn-gray {
+      background: var(--bg-input);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+    
+    .btn-gray:hover {
+      background: rgba(255,255,255,0.05);
+      color: var(--text-main);
+    }
+    
+    .btn-primary {
+      background: var(--accent);
+      color: var(--bg-base);
+    }
+    
+    .btn-primary:hover {
+      background: var(--accent-hover);
+    }
+    
+    #toast {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: var(--success);
+      color: var(--bg-base);
+      font-weight: 600;
+      font-size: 13px;
+      padding: 12px 24px;
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      opacity: 0;
+      transform: translateY(-20px);
+      transition: all 0.3s;
+      pointer-events: none;
+      z-index: 1000;
+    }
+    
+    #toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h2>🖥️ 系统与业务配置中心</h2>
+    
+    <div>
+      <div class="section-title">🕒 业务排班配置</div>
+      <div class="card">
+        <div class="row">
+          <div class="form-group">
+            <label for="day_start">白班开始时间</label>
+            <input type="text" id="day_start" placeholder="08:00">
+          </div>
+          <div class="form-group">
+            <label for="day_end">白班结束时间</label>
+            <input type="text" id="day_end" placeholder="20:00">
+          </div>
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <div class="form-group">
+            <label for="night_start">夜班开始时间</label>
+            <input type="text" id="night_start" placeholder="20:00">
+          </div>
+          <div class="form-group">
+            <label for="night_end">夜班结束时间</label>
+            <input type="text" id="night_end" placeholder="08:00">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">⚙️ 后端系统配置</div>
+      <div class="card">
+        <div class="switch-group">
+          <div class="switch-label">
+            <span style="font-size: 13px;">自动提取商家凭证 (Auto Login)</span>
+            <span class="switch-desc">是否在启动和刷新时自动扫描抓取 Chrome/Edge 的最新 Cookie</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="auto_login">
+            <span class="slider"></span>
+          </label>
+        </div>
+        
+        <div class="form-group" style="margin-top: 14px;">
+          <label for="cookie_raw">美团商家 Cookie 证书内容 (可在此直接粘贴更新)</label>
+          <textarea id="cookie_raw" rows="6" placeholder='粘贴美团商家后台最新的 Cookie JSON 或原始字符串...'></textarea>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">📊 大盘偏好配置</div>
+      <div class="card">
+        <div class="switch-group">
+          <div class="switch-label">
+            <span style="font-size: 13px;">财务敏感信息过滤 (Key Info)</span>
+            <span class="switch-desc">启用后将只显示纯净商品名，不显示敏感前缀</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="key_info">
+            <span class="slider"></span>
+          </label>
+        </div>
+        
+        <div class="switch-group" style="margin-top: 12px;">
+          <div class="switch-label">
+            <span style="font-size: 13px;">复制时包含表头</span>
+            <span class="switch-desc">复制账单明细时是否默认带上第一行列属性标题</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="copy_header">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-gray" onclick="window.close()">关闭</button>
+      <button class="btn btn-primary" onclick="save()">保存配置</button>
+    </div>
+  </div>
+
+  <div id="toast">配置已成功保存并同步至后端！</div>
+
+  <script>
+    const API = window.location.origin;
+    let originalSettings = {};
+
+    function showToast() {
+      const t = document.getElementById('toast');
+      t.className = 'show';
+      setTimeout(() => { t.className = ''; }, 2500);
+    }
+
+    // 从后端 API 加载当前设置
+    function load() {
+      fetch(API + '/api/settings')
+        .then(r => r.json())
+        .then(s => {
+          originalSettings = s;
+          
+          // 排班回显
+          const pad2 = n => String(n).padStart(2, '0');
+          if (s.shift) {
+            document.getElementById('day_start').value = pad2(s.shift.day_start[0]) + ':' + pad2(s.shift.day_start[1]);
+            document.getElementById('day_end').value = pad2(s.shift.day_end[0]) + ':' + pad2(s.shift.day_end[1]);
+            document.getElementById('night_start').value = pad2(s.shift.night_start[0]) + ':' + pad2(s.shift.night_start[1]);
+            document.getElementById('night_end').value = pad2(s.shift.night_end[0]) + ':' + pad2(s.shift.night_end[1]);
+          }
+          
+          // 后端系统与大盘回显
+          document.getElementById('auto_login').checked = s.auto_login !== false;
+          document.getElementById('cookie_raw').value = s.cookie_raw || '';
+          document.getElementById('key_info').checked = s.key_info || false;
+          document.getElementById('copy_header').checked = s.copy_header || false;
+        })
+        .catch(e => console.error("加载配置失败:", e));
+    }
+
+    // 保存设置回后端
+    function save() {
+      const dayS = document.getElementById('day_start').value.split(':').map(Number);
+      const dayE = document.getElementById('day_end').value.split(':').map(Number);
+      const nightS = document.getElementById('night_start').value.split(':').map(Number);
+      const nightE = document.getElementById('night_end').value.split(':').map(Number);
+      
+      const payload = {
+        ...originalSettings,
+        key_info: document.getElementById('key_info').checked,
+        copy_header: document.getElementById('copy_header').checked,
+        auto_login: document.getElementById('auto_login').checked,
+        cookie_raw: document.getElementById('cookie_raw').value,
+        shift: {
+          day_start: dayS,
+          day_end: dayE,
+          night_start: nightS,
+          night_end: nightE
+        }
+      };
+
+      fetch(API + '/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(r => r.json())
+      .then(res => {
+        showToast();
+        // 延迟一段时间后关闭页面
+        setTimeout(() => { window.close(); }, 1500);
+      })
+      .catch(e => alert("保存失败: " + e));
+    }
+
+    // 初始化加载
+    window.onload = load;
+  </script>
+</body>
+</html>

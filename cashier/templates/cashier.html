@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>创新意 · 收银台</title>
+<style>
+:root {
+  --green:#10b981; --green-glow:rgba(16,185,129,.3);
+  --amber:#f59e0b; --amber-glow:rgba(245,158,11,.3);
+  --red:#f43f5e;  --red-glow:rgba(244,63,94,.3);
+  --purple:#8b5cf6; --purple-glow:rgba(139,92,246,.35);
+  --bg:#070b16; --surface:rgba(15,23,45,.65); --surface2:rgba(22,33,60,.75);
+  --surface-dark:rgba(7,11,22,.85); --border:rgba(255,255,255,.07);
+  --border2:rgba(255,255,255,.12);
+  --t1:#f1f5f9; --t2:#94a3b8; --t3:#64748b; --t4:#475569;
+  --radius:14px; --radius-sm:10px; --radius-lg:18px;
+  --font:"Inter","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:"JetBrains Mono","SF Mono","Consolas",monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--font);background:var(--bg);color:var(--t1);min-height:100vh;font-size:14px;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+.bg-orb{position:fixed;border-radius:50%;filter:blur(140px);opacity:.2;pointer-events:none;z-index:0}
+.bg-orb-1{width:600px;height:600px;background:radial-gradient(circle,var(--green-glow),transparent);top:-20%;left:-15%;animation:d1 30s ease-in-out infinite}
+.bg-orb-2{width:500px;height:500px;background:radial-gradient(circle,var(--purple-glow),transparent);bottom:-15%;right:-10%;animation:d2 35s ease-in-out infinite}
+@keyframes d1{0%,100%{transform:translate(0,0)}50%{transform:translate(60px,-40px)}}
+@keyframes d2{0%,100%{transform:translate(0,0)}50%{transform:translate(-50px,30px)}}
+.app{position:relative;z-index:1;max-width:1320px;margin:0 auto;padding:20px}
+
+/* ══ Header ══ */
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px}
+.brand{display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer}
+.brand-logo{width:66px;height:66px;display:flex;align-items:center;justify-content:center;flex-shrink:0;position:relative}
+.brand-logo svg{width:66px;height:66px;stroke:var(--purple);animation:logo-pulse 3s ease-in-out infinite}
+@keyframes logo-pulse{0%,100%{opacity:.85}50%{opacity:1}}
+.brand-logo::after{content:'';position:absolute;inset:-12px;border-radius:50%;background:radial-gradient(circle,var(--purple-glow),transparent 70%);animation:logo-halo 3s ease-in-out infinite;pointer-events:none}
+@keyframes logo-halo{0%,100%{opacity:.6;transform:scale(1)}50%{opacity:1;transform:scale(1.15)}}
+.brand-info h1{font-size:20px;font-weight:800;letter-spacing:.08em;line-height:1.2;color:var(--t1)}
+.brand-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green-glow);animation:livePulse 2.2s ease-in-out infinite;vertical-align:middle;margin:0 6px;position:relative;top:-1px}
+@keyframes livePulse{0%,100%{box-shadow:0 0 6px var(--green-glow)}50%{box-shadow:0 0 18px var(--green-glow),0 0 36px var(--green-glow)}}
+.header-right{display:flex;align-items:center;gap:8px}
+.pill{padding:5px 14px;border-radius:20px;background:var(--surface);border:1px solid var(--border);font-size:13px;font-weight:600;color:var(--t2)}
+.pill.active{color:var(--green);border-color:var(--green)}
+
+/* ══ Buttons ══ */
+.btn{padding:7px 16px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--t1);transition:all .15s}
+.btn:hover{border-color:var(--border2);background:var(--surface2)}
+.btn-primary{background:var(--purple);border-color:var(--purple);color:#fff}
+.btn-primary:hover{background:#7c3aed}
+.btn-green{background:var(--green);border-color:var(--green);color:#fff}
+.btn-green:hover{background:#059669}
+.btn-sm{padding:4px 10px;font-size:12px}
+
+/* ══ 顶部汇总条（对应 Excel R3 行）══ */
+.topbar{display:flex;gap:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:16px}
+.topbar-cell{flex:1;padding:12px 16px;border-right:1px solid var(--border);text-align:center}
+.topbar-cell:last-child{border-right:none}
+.topbar-cell .lbl{font-size:11px;color:var(--t4);font-weight:600;letter-spacing:.06em;margin-bottom:4px}
+.topbar-cell .val{font-size:18px;font-weight:800;font-family:var(--mono)}
+.topbar-cell .val.green{color:var(--green)}
+.topbar-cell .val.amber{color:var(--amber)}
+.topbar-cell .val.red{color:var(--red)}
+.topbar-cell .val.purple{color:var(--purple)}
+.topbar-cell.head{background:rgba(7,11,22,.5)}
+.topbar-cell.head .lbl{color:var(--t2)}
+.topbar-cell.head .val{font-size:14px;color:var(--t1)}
+
+/* ══ 主布局 ══ */
+.layout{display:grid;grid-template-columns:1fr 1fr 300px;gap:14px}
+@media(max-width:1100px){.layout{grid-template-columns:1fr 1fr}}
+@media(max-width:700px){.layout{grid-template-columns:1fr}}
+
+/* ══ Panel ══ */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:14px}
+.panel-head{padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;font-weight:700;color:var(--t2);display:flex;align-items:center;gap:8px;background:rgba(7,11,22,.3)}
+.panel-head .dot{width:8px;height:8px;border-radius:50%}
+.panel-head .add-btn{margin-left:auto;padding:3px 10px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--t3);cursor:pointer}
+.panel-head .add-btn:hover{color:var(--t1);border-color:var(--border2)}
+
+/* ══ Table ══ */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:center;padding:8px 6px;font-weight:700;color:var(--t1);border-bottom:2px solid rgba(255,255,255,.1);white-space:nowrap;font-size:11px;letter-spacing:.02em;background:rgba(7,11,22,.4)}
+td{padding:5px 6px;border-bottom:1px solid rgba(255,255,255,.03);white-space:nowrap;text-align:center;vertical-align:middle}
+tr:hover td{background:rgba(255,255,255,.03)}
+td input,td select{width:100%;padding:5px 6px;border-radius:5px;border:1px solid rgba(255,255,255,.06);background:rgba(7,11,22,.5);color:var(--t1);font-size:12px;font-family:var(--mono);outline:none;transition:border-color .15s;text-align:center}
+td input:focus,td select:focus{border-color:var(--purple)}
+td input[type=text]{font-family:var(--font)}
+td .idx{color:var(--t4);font-size:11px}
+td .del{color:var(--red);cursor:pointer;font-size:15px;opacity:.4;transition:opacity .15s}
+td .del:hover{opacity:1}
+td .amt{color:var(--green);font-family:var(--mono);font-weight:600;text-align:right;padding-right:10px}
+
+/* 售货清单表头 — 精确对应 Excel C5:N5 */
+.sales-th-group{background:rgba(7,11,22,.6)}
+.col-name{min-width:90px;text-align:left}
+.col-num{width:50px}
+.col-price{width:55px}
+
+/* ══ 班次信息面板 ══ */
+.info-panel .panel-body{padding:14px 16px}
+.info-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.03)}
+.info-row:last-child{border-bottom:none}
+.info-row .lbl{font-size:12px;color:var(--t3);font-weight:600}
+.info-row input,.info-row select{width:140px;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:rgba(7,11,22,.5);color:var(--t1);font-size:13px;font-family:var(--mono);outline:none;text-align:right}
+.info-row input:focus{border-color:var(--purple)}
+.info-row input[type=text]{font-family:var(--font);text-align:left;width:180px}
+
+/* ══ 交班现金条 ══ */
+.cash-bar{background:linear-gradient(135deg,#3b1264,#6d28d9);border-radius:var(--radius);padding:16px 22px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center}
+.cash-bar .lbl{font-size:12px;color:rgba(255,255,255,.7);font-weight:700;letter-spacing:.04em}
+.cash-bar .amt{font-size:28px;font-weight:900;color:#fff;font-family:var(--mono)}
+
+/* ══ 版本栏 ══ */
+.ver-bar{display:flex;align-items:center;gap:6px;padding:8px 12px;background:rgba(7,11,22,.4);border-radius:var(--radius-sm);font-size:11px;color:var(--t3);flex-wrap:wrap;margin-bottom:14px}
+.ver-bar .ver-item{padding:3px 9px;border-radius:5px;background:var(--surface);border:1px solid var(--border);cursor:pointer;transition:all .15s;font-family:var(--mono)}
+.ver-bar .ver-item:hover{border-color:var(--purple);color:var(--t1)}
+.ver-bar .ver-item.current{border-color:var(--green);color:var(--green)}
+
+/* ══ 操作按钮组 ══ */
+.actions{display:flex;gap:10px;margin-bottom:14px}
+.actions .btn{flex:1}
+
+/* ══ Empty state ══ */
+.empty{text-align:center;padding:80px 20px;color:var(--t3)}
+.empty h2{font-size:18px;margin-bottom:8px;color:var(--t2)}
+.empty p{font-size:13px;margin-bottom:20px}
+
+/* ══ Toast ══ */
+.toast{position:fixed;top:20px;right:20px;padding:10px 22px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;z-index:9999;opacity:0;transform:translateY(-10px);transition:all .3s}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.ok{background:var(--green);color:#fff}
+.toast.err{background:var(--red);color:#fff}
+
+/* ══ Modal ══ */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center}
+.modal.open{display:flex}
+.modal-card{background:var(--surface-dark);border:1px solid var(--border);border-radius:var(--radius-lg);padding:26px;width:90%;max-width:400px}
+.modal-card h3{margin-bottom:14px;font-size:16px}
+.modal-card select,.modal-card input{width:100%;padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);color:var(--t1);font-size:14px;margin-bottom:10px}
+.modal-card .acts{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
+</style>
+</head>
+<body>
+<div class="bg-orb bg-orb-1"></div>
+<div class="bg-orb bg-orb-2"></div>
+<div class="app">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="44" cy="44" r="40" stroke="currentColor" stroke-width="1.2" opacity="0.25"/>
+          <circle cx="44" cy="44" r="36" stroke="currentColor" stroke-width="0.7" opacity="0.12" stroke-dasharray="3 5"/>
+          <polygon points="44,12 72,28 72,60 44,76 16,60 16,28" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" opacity="0.45"/>
+          <path d="M22,36 Q22,18 44,18 Q66,18 66,36" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>
+          <path d="M22,36 L22,50 Q22,56 28,56 L35,56 L35,48 L28,48 L28,36" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+          <path d="M66,36 L66,50 Q66,56 60,56 L53,56 L53,48 L60,48 L60,36" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+          <path d="M28,42 L22,56 L26,56" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="26" cy="56" r="2" fill="currentColor" opacity="0.9"/>
+          <polygon points="42,24 40,16 45,16 39,10 43,14 38,14" fill="currentColor" opacity="0.85"/>
+          <rect x="26" y="60" width="7" height="5" rx="1.2" stroke="currentColor" stroke-width="1.3" opacity="0.5"/>
+          <rect x="35" y="60" width="7" height="5" rx="1.2" stroke="currentColor" stroke-width="1.3" opacity="0.5"/>
+          <rect x="44" y="60" width="7" height="5" rx="1.2" stroke="currentColor" stroke-width="1.3" opacity="0.5"/>
+          <rect x="53" y="60" width="7" height="5" rx="1.2" stroke="currentColor" stroke-width="1.3" opacity="0.5"/>
+          <line x1="32" y1="56" x2="28" y2="66" stroke="currentColor" stroke-width="0.8" opacity="0.3" stroke-linecap="round"/>
+          <line x1="44" y1="56" x2="44" y2="68" stroke="currentColor" stroke-width="0.8" opacity="0.3" stroke-linecap="round"/>
+          <line x1="56" y1="56" x2="60" y2="66" stroke="currentColor" stroke-width="0.8" opacity="0.3" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="brand-info">
+        <h1>创新意 <span class="brand-dot"></span> 收银台</h1>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="pill" id="datePill"></span>
+      <span class="pill" id="shiftPill"></span>
+      <button class="btn btn-primary btn-sm" onclick="showNewShift()">新建班次</button>
+    </div>
+  </div>
+
+  <!-- 顶部汇总条（对应 Excel R3: 售货清单|日期|班次|收银员|美团|金额|网费|金额|售货|金额|支出|金额）-->
+  <div class="topbar" id="topbar" style="display:none">
+    <div class="topbar-cell head"><div class="lbl">售货清单</div><div class="val" id="tbTitle">--</div></div>
+    <div class="topbar-cell"><div class="lbl">美团</div><div class="val amber" id="tbMeituan">¥0</div></div>
+    <div class="topbar-cell"><div class="lbl">网费</div><div class="val green" id="tbNet">¥0</div></div>
+    <div class="topbar-cell"><div class="lbl">售货</div><div class="val green" id="tbSales">¥0</div></div>
+    <div class="topbar-cell"><div class="lbl">支出</div><div class="val red" id="tbExpense">¥0</div></div>
+    <div class="topbar-cell"><div class="lbl">现金结余</div><div class="val purple" id="tbCash">¥0</div></div>
+  </div>
+
+  <!-- 交班现金 -->
+  <div class="cash-bar" id="cashBar" style="display:none">
+    <div class="lbl">交班现金</div>
+    <div class="amt" id="cashEnd">¥0</div>
+  </div>
+
+  <!-- 版本栏 -->
+  <div class="ver-bar" id="verBar" style="display:none"></div>
+
+  <!-- 主布局 -->
+  <div class="layout" id="layout" style="display:none">
+
+    <!-- 左列：售货清单 -->
+    <div>
+      <div class="panel">
+        <div class="panel-head"><span class="dot" style="background:var(--green)"></span>售货清单</div>
+        <div class="tbl-wrap">
+          <table id="salesTable">
+            <thead>
+              <tr>
+                <th class="col-num">#</th>
+                <th class="col-name">商品名称</th>
+                <th>原数</th>
+                <th>加</th>
+                <th>剩余</th>
+                <th>销量</th>
+                <th>售额</th>
+                <th>库存</th>
+                <th>进货</th>
+                <th>兑奖</th>
+                <th>扣减</th>
+                <th>单价</th>
+                <th>规格</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 中列：支出 + 交易快照 -->
+    <div>
+      <!-- 支出明细表 -->
+      <div class="panel">
+        <div class="panel-head">
+          <span class="dot" style="background:var(--red)"></span>支出明细
+          <button class="add-btn" onclick="addExpenseRow()">+ 添加</button>
+        </div>
+        <div class="tbl-wrap">
+          <table id="expenseTable">
+            <thead><tr>
+              <th>支出项目</th><th>支出金额</th><th>吧台支付</th><th>财务支付</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 入账/退款表 -->
+      <div class="panel">
+        <div class="panel-head">
+          <span class="dot" style="background:var(--green)"></span>入账/退款
+          <button class="add-btn" onclick="addIncomeRow()">+ 添加</button>
+        </div>
+        <div class="tbl-wrap">
+          <table id="incomeTable">
+            <thead><tr>
+              <th>入账项目</th><th>入账金额</th><th>合计</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 交易快照 -->
+      <div class="panel">
+        <div class="panel-head">
+          <span class="dot" style="background:var(--amber)"></span>交易快照
+          <button class="add-btn" onclick="addTxnRow()">+ 添加</button>
+        </div>
+        <div class="tbl-wrap">
+          <table id="txnTable">
+            <thead><tr>
+              <th style="width:30px">序</th><th>交易快照</th><th>商品类型</th><th>券号</th><th>消费金额</th><th>商家优惠金额</th><th>消费时间</th><th>用户手机</th><th>备注</th><th>验证门店</th><th>实际金额</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右列：班次信息 + 操作 -->
+    <div>
+      <div class="panel info-panel">
+        <div class="panel-head"><span class="dot" style="background:var(--purple)"></span>班次信息</div>
+        <div class="panel-body">
+          <div class="info-row"><span class="lbl">收银员</span><select id="fOperator" style="width:140px"><option value="">-- 选择 --</option></select></div>
+          <div class="info-row"><span class="lbl">美团</span><input id="fMeituan" type="number" value="0" step="0.01"></div>
+          <div class="info-row"><span class="lbl">网费</span><input id="fNetworkFee" type="number" value="0" step="0.01" oninput="updateDiff()"></div>
+          <div class="info-row"><span class="lbl">应缴</span><input id="fNetworkFeeDue" type="number" value="0" step="0.01" oninput="updateDiff()"></div>
+          <div class="info-row"><span class="lbl">差额</span><span id="fDiff" class="val" style="font-family:var(--mono);font-weight:700">¥0</span></div>
+          <div class="info-row"><span class="lbl">开班现金</span><input id="fCashBegin" type="number" value="0" step="0.01"></div>
+          <div class="info-row"><span class="lbl">交班现金</span><input id="fCashEnd" type="number" value="0" step="0.01"></div>
+          <div class="info-row"><span class="lbl">备注</span><input id="fNotes" type="text" placeholder="备注"></div>
+        </div>
+      </div>
+
+      <div class="actions" style="flex-direction:column">
+        <button class="btn btn-green" onclick="saveShift()">保存 (Ctrl+S)</button>
+        <button class="btn btn-primary" onclick="closeShift()">交班</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Empty State -->
+  <div class="empty" id="emptyState">
+    <h2>今天还没有班次</h2>
+    <p>点击"新建班次"开始录入</p>
+    <button class="btn btn-primary" onclick="showNewShift()">新建班次</button>
+  </div>
+</div>
+
+<!-- New Shift Modal -->
+<div class="modal" id="newShiftModal">
+  <div class="modal-card">
+    <h3>新建班次</h3>
+    <select id="newShiftType"><option value="白班">白班</option><option value="晚班">晚班</option></select>
+    <input id="newShiftDate" type="date">
+    <select id="newShiftOperator"><option value="">-- 选择收银员 --</option></select>
+    <div class="acts">
+      <button class="btn" onclick="hideNewShift()">取消</button>
+      <button class="btn btn-primary" onclick="createShift()">创建</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentShift = null;
+let today = new Date().toISOString().slice(0,10);
+let employees = [];
+let feePlans = [];
+
+document.getElementById('datePill').textContent = today;
+
+// 加载员工和套餐
+async function loadMeta() {
+  const [empR, planR] = await Promise.all([
+    fetch('/api/employees').then(r => r.json()),
+    fetch('/api/fee-plans').then(r => r.json()),
+  ]);
+  employees = empR.employees || [];
+  feePlans = planR.fee_plans || [];
+  // 填充收银员下拉
+  const sel1 = document.getElementById('fOperator');
+  const sel2 = document.getElementById('newShiftOperator');
+  employees.forEach(e => {
+    sel1.innerHTML += `<option value="${e.name}">${e.name}</option>`;
+    sel2.innerHTML += `<option value="${e.name}">${e.name}</option>`;
+  });
+}
+
+loadMeta().then(loadToday);
+
+async function loadToday() {
+  const r = await fetch('/api/shifts/today');
+  const d = await r.json();
+  const shifts = d.shifts || [];
+  if (shifts.length === 0) {
+    // 今天没班次，加载最近的班次
+    const r2 = await fetch('/api/shifts/latest');
+    if (r2.ok) {
+      const d2 = await r2.json();
+      if (d2.shift) { currentShift = d2; renderShift(d2); return; }
+    }
+    showEmpty();
+  } else {
+    loadShift(shifts[shifts.length - 1].id);
+  }
+}
+
+async function loadShift(id) {
+  const r = await fetch('/api/shifts/' + id);
+  const d = await r.json();
+  currentShift = d;
+  renderShift(d);
+}
+
+function showEmpty() {
+  document.getElementById('emptyState').style.display = 'block';
+  document.getElementById('layout').style.display = 'none';
+  document.getElementById('topbar').style.display = 'none';
+  document.getElementById('cashBar').style.display = 'none';
+  document.getElementById('verBar').style.display = 'none';
+}
+
+function showNewShift() {
+  document.getElementById('newShiftDate').value = today;
+  document.getElementById('newShiftModal').classList.add('open');
+}
+function hideNewShift() {
+  document.getElementById('newShiftModal').classList.remove('open');
+}
+async function createShift() {
+  const data = {
+    date: document.getElementById('newShiftDate').value,
+    shift_type: document.getElementById('newShiftType').value,
+    operator: document.getElementById('newShiftOperator').value,
+  };
+  const r = await fetch('/api/shifts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+  const d = await r.json();
+  hideNewShift();
+  currentShift = d.data;
+  renderShift(d.data);
+  toast('班次已创建', 'ok');
+}
+
+function renderShift(d) {
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('layout').style.display = 'grid';
+  document.getElementById('topbar').style.display = 'flex';
+  document.getElementById('cashBar').style.display = 'flex';
+
+  const s = d.shift;
+  document.getElementById('shiftPill').textContent = s.shift_type;
+  document.getElementById('shiftPill').classList.add('active');
+  document.getElementById('datePill').textContent = s.shift_date;
+  document.getElementById('tbTitle').textContent = s.shift_date + ' ' + s.shift_type;
+
+  document.getElementById('fOperator').value = s.operator || '';
+  document.getElementById('fMeituan').value = s.meituan || 0;
+  document.getElementById('fNetworkFee').value = s.network_fee || 0;
+  document.getElementById('fNetworkFeeDue').value = s.network_fee_due || 0;
+  document.getElementById('fCashBegin').value = s.cash_begin || 0;
+  document.getElementById('fCashEnd').value = s.cash_end || 0;
+  document.getElementById('fNotes').value = s.notes || '';
+  updateDiff();
+
+  // 售货清单 — 对应 Excel C5:N5: 商品名称|原数|加|剩余|销量|售额|库存|进货|兑奖|扣减|单价|规格
+  const stb = document.querySelector('#salesTable tbody');
+  stb.innerHTML = '';
+  d.sales_items.forEach((item, i) => {
+    const saleAmount = (item.sold || 0) * (item.unit_price || 0);
+    stb.innerHTML += `<tr>
+      <td class="idx">${i+1}</td>
+      <td class="col-name"><input type="text" value="${item.product_name}" data-t="sales" data-f="product_name" data-i="${i}"></td>
+      <td><input type="number" value="${item.begin_stock}" data-t="sales" data-f="begin_stock" data-i="${i}"></td>
+      <td><input type="number" value="${item.restock}" data-t="sales" data-f="restock" data-i="${i}" oninput="calcEnd(this)"></td>
+      <td><input type="number" value="${item.end_stock}" data-t="sales" data-f="end_stock" data-i="${i}"></td>
+      <td><input type="number" value="${item.sold}" data-t="sales" data-f="sold" data-i="${i}" oninput="calcRow(this)"></td>
+      <td class="amt row-sale" style="color:var(--green)">¥${saleAmount.toFixed(2)}</td>
+      <td><input type="number" value="${item.end_stock}" data-t="sales" data-f="end_stock2" data-i="${i}"></td>
+      <td><input type="number" value="0" data-t="sales" data-f="restock2" data-i="${i}" style="width:45px"></td>
+      <td><input type="number" value="0" data-t="sales" data-f="prize" data-i="${i}" style="width:45px"></td>
+      <td><input type="number" value="0" data-t="sales" data-f="deduct" data-i="${i}" style="width:45px"></td>
+      <td><input type="number" value="${item.unit_price}" data-t="sales" data-f="unit_price" data-i="${i}" style="width:50px" oninput="calcRow2(this)"></td>
+      <td><input type="number" value="${item.capacity}" data-t="sales" data-f="capacity" data-i="${i}" style="width:45px"></td>
+    </tr>`;
+  });
+
+  renderExpenses(d.expenses);
+  renderIncome(d.income_items);
+  renderTxns(d.transactions);
+  renderVersions(d.versions);
+  calcSummary();
+}
+
+function renderExpenses(items) {
+  const tb = document.querySelector('#expenseTable tbody');
+  tb.innerHTML = '';
+  (items || []).forEach((item, i) => {
+    const isBaTai = item.payment_type === '吧台支付';
+    const isCaiwu = item.payment_type === '财务支付';
+    tb.innerHTML += `<tr>
+      <td><input type="text" value="${item.item}" data-t="expense" data-f="item" data-i="${i}"></td>
+      <td><input type="number" value="${item.amount}" data-t="expense" data-f="amount" data-i="${i}" oninput="calcSummary()" style="text-align:right"></td>
+      <td><input type="checkbox" ${isBaTai?'checked':''} data-t="expense" data-f="payment_batai" data-i="${i}" onchange="setPayType(this)"></td>
+      <td><input type="checkbox" ${isCaiwu?'checked':''} data-t="expense" data-f="payment_caiwu" data-i="${i}" onchange="setPayType(this)"></td>
+      <td><span class="del" onclick="this.closest('tr').remove();calcSummary()">×</span></td>
+    </tr>`;
+  });
+}
+function setPayType(checkbox) {
+  const tr = checkbox.closest('tr');
+  const cbs = tr.querySelectorAll('input[type=checkbox]');
+  if (checkbox.checked) {
+    cbs.forEach(cb => { if (cb !== checkbox) cb.checked = false; });
+  }
+  calcSummary();
+}
+function addExpenseRow() {
+  const tb = document.querySelector('#expenseTable tbody');
+  const i = tb.children.length;
+  tb.innerHTML += `<tr>
+    <td><input type="text" value="" data-t="expense" data-f="item" data-i="${i}"></td>
+    <td><input type="number" value="0" data-t="expense" data-f="amount" data-i="${i}" oninput="calcSummary()" style="text-align:right"></td>
+    <td><input type="checkbox" data-t="expense" data-f="payment_batai" data-i="${i}" onchange="setPayType(this)"></td>
+    <td><input type="checkbox" data-t="expense" data-f="payment_caiwu" data-i="${i}" onchange="setPayType(this)"></td>
+    <td><span class="del" onclick="this.closest('tr').remove();calcSummary()">×</span></td>
+  </tr>`;
+}
+
+function renderIncome(items) {
+  const tb = document.querySelector('#incomeTable tbody');
+  tb.innerHTML = '';
+  let total = 0;
+  (items || []).forEach((item, i) => {
+    total += item.amount || 0;
+    tb.innerHTML += `<tr>
+      <td><input type="text" value="${item.item}" data-t="income" data-f="item" data-i="${i}"></td>
+      <td><input type="number" value="${item.amount}" data-t="income" data-f="amount" data-i="${i}" oninput="calcSummary()" style="text-align:right"></td>
+      <td class="amt" id="incomeTotal">¥${total.toFixed(2)}</td>
+      <td><span class="del" onclick="this.closest('tr').remove();calcSummary()">×</span></td>
+    </tr>`;
+  });
+  if (tb.children.length > 0) {
+    document.getElementById('incomeTotal').textContent = '¥' + total.toFixed(2);
+  }
+}
+function addIncomeRow() {
+  const tb = document.querySelector('#incomeTable tbody');
+  const i = tb.children.length;
+  tb.innerHTML += `<tr>
+    <td><input type="text" value="" data-t="income" data-f="item" data-i="${i}"></td>
+    <td><input type="number" value="0" data-t="income" data-f="amount" data-i="${i}" oninput="calcSummary()" style="text-align:right"></td>
+    <td class="amt">¥0</td>
+    <td><span class="del" onclick="this.closest('tr').remove();calcSummary()">×</span></td>
+  </tr>`;
+  calcSummary();
+}
+
+function renderTxns(items) {
+  const tb = document.querySelector('#txnTable tbody');
+  tb.innerHTML = '';
+  (items || []).forEach((item, i) => {
+    tb.innerHTML += `<tr>
+      <td class="idx" data-t="txn-seq">${i+1}</td>
+      <td><input type="text" value="${(item.product_name||'').substring(0,100)}" data-t="txn" data-f="product_name" data-i="${i}" style="width:180px" title="${(item.product_name||'').replace(/"/g,'&quot;')}"></td>
+      <td><input type="text" value="${item.product_type||''}" data-t="txn" data-f="product_type" data-i="${i}" style="width:55px"></td>
+      <td><input type="text" value="${item.coupon||''}" data-t="txn" data-f="coupon" data-i="${i}" style="width:90px"></td>
+      <td><input type="number" value="${item.actual_paid||0}" data-t="txn" data-f="actual_paid" data-i="${i}" style="width:65px;text-align:right" oninput="calcMeituan()"></td>
+      <td><input type="number" value="${item.merchant_subsidy||0}" data-t="txn" data-f="merchant_subsidy" data-i="${i}" style="width:55px;text-align:right" oninput="calcMeituan()"></td>
+      <td><input type="text" value="${item.duration||''}" data-t="txn" data-f="duration" data-i="${i}" style="width:120px"></td>
+      <td><input type="text" value="${item.user_phone||''}" data-t="txn" data-f="user_phone" data-i="${i}" style="width:80px"></td>
+      <td><input type="text" value="${item.remark||''}" data-t="txn" data-f="remark" data-i="${i}" style="width:40px"></td>
+      <td><input type="text" value="${item.verify_code||''}" data-t="txn" data-f="verify_code" data-i="${i}" style="width:80px"></td>
+      <td><input type="number" value="${item.fee_type||0}" data-t="txn" data-f="fee_type" data-i="${i}" style="width:50px;text-align:right" oninput="calcMeituan()"></td>
+      <td><span class="del" onclick="delTxn(this)">×</span></td>
+    </tr>`;
+  });
+  calcMeituan();
+}
+function addTxnRow() {
+  const tb = document.querySelector('#txnTable tbody');
+  const i = tb.children.length;
+  tb.innerHTML += `<tr>
+    <td class="idx" data-t="txn-seq">${i+1}</td>
+    <td><input type="text" value="" data-t="txn" data-f="product_name" data-i="${i}" style="width:180px"></td>
+    <td><input type="text" value="" data-t="txn" data-f="product_type" data-i="${i}" style="width:55px"></td>
+    <td><input type="text" value="" data-t="txn" data-f="coupon" data-i="${i}" style="width:90px"></td>
+    <td><input type="number" value="0" data-t="txn" data-f="actual_paid" data-i="${i}" style="width:65px;text-align:right" oninput="calcMeituan()"></td>
+    <td><input type="number" value="0" data-t="txn" data-f="merchant_subsidy" data-i="${i}" style="width:55px;text-align:right" oninput="calcMeituan()"></td>
+    <td><input type="text" value="" data-t="txn" data-f="duration" data-i="${i}" style="width:120px"></td>
+    <td><input type="text" value="" data-t="txn" data-f="user_phone" data-i="${i}" style="width:80px"></td>
+    <td><input type="text" value="" data-t="txn" data-f="remark" data-i="${i}" style="width:40px"></td>
+    <td><input type="text" value="" data-t="txn" data-f="verify_code" data-i="${i}" style="width:80px"></td>
+    <td><input type="number" value="0" data-t="txn" data-f="fee_type" data-i="${i}" style="width:50px;text-align:right" oninput="calcMeituan()"></td>
+    <td><span class="del" onclick="delTxn(this)">×</span></td>
+  </tr>`;
+  renumberTxns();
+  calcMeituan();
+}
+function delTxn(el) {
+  el.closest('tr').remove();
+  renumberTxns();
+  calcMeituan();
+}
+function renumberTxns() {
+  document.querySelectorAll('#txnTable tbody tr').forEach((tr, i) => {
+    tr.querySelector('[data-t="txn-seq"]').textContent = i + 1;
+  });
+}
+function calcMeituan() {
+  let total = 0;
+  document.querySelectorAll('#txnTable tbody tr').forEach(tr => {
+    total += parseFloat(tr.children[10].querySelector('input').value) || 0;
+  });
+  document.getElementById('fMeituan').value = total.toFixed(2);
+  calcSummary();
+}
+
+function renderVersions(versions) {
+  const bar = document.getElementById('verBar');
+  if (!versions || versions.length === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.innerHTML = '<span style="color:var(--t4)">版本:</span>';
+  versions.forEach(v => {
+    const isCurrent = v.version_num === versions.length;
+    bar.innerHTML += `<span class="ver-item ${isCurrent?'current':''}" onclick="viewVersion(${v.id})" title="${v.action} ${v.operator||''} ${v.created_at}">v${v.version_num}</span>`;
+  });
+}
+
+async function viewVersion(vid) {
+  const sid = currentShift.shift.id;
+  const r = await fetch(`/api/shifts/${sid}/versions/${vid}`);
+  const d = await r.json();
+  if (confirm(`版本 v${d.version.version_num}\n操作: ${d.version.action}\n时间: ${d.version.created_at}\n\n确定恢复到此版本？`)) {
+    const r2 = await fetch(`/api/shifts/${sid}/rollback/${vid}`, {method:'POST'});
+    const d2 = await r2.json();
+    currentShift = d2.data;
+    renderShift(d2.data);
+    toast('已回滚', 'ok');
+  }
+}
+
+function updateDiff() {
+  const fee = parseFloat(document.getElementById('fNetworkFee').value) || 0;
+  const due = parseFloat(document.getElementById('fNetworkFeeDue').value) || 0;
+  const diff = fee - due;
+  const el = document.getElementById('fDiff');
+  el.textContent = '¥' + diff.toFixed(2);
+  el.style.color = diff < 0 ? 'var(--red)' : 'var(--green)';
+}
+
+// ── 计算 ──
+function calcEnd(input) {
+  const tr = input.closest('tr');
+  const begin = parseFloat(tr.children[2].querySelector('input').value) || 0;
+  const restock = parseFloat(tr.children[3].querySelector('input').value) || 0;
+  tr.children[4].querySelector('input').value = begin + restock;
+  calcRow(tr.children[5].querySelector('input'));
+}
+
+function calcRow(input) {
+  const tr = input.closest('tr');
+  const sold = parseFloat(tr.children[5].querySelector('input').value) || 0;
+  const price = parseFloat(tr.children[11].querySelector('input').value) || 0;
+  tr.children[6].textContent = '¥' + (sold * price).toFixed(2);
+  calcSummary();
+}
+function calcRow2(input) {
+  const tr = input.closest('tr');
+  const sold = parseFloat(tr.children[5].querySelector('input').value) || 0;
+  const price = parseFloat(tr.children[11].querySelector('input').value) || 0;
+  tr.children[6].textContent = '¥' + (sold * price).toFixed(2);
+  calcSummary();
+}
+
+function calcSummary() {
+  let salesTotal = 0;
+  document.querySelectorAll('#salesTable tbody tr').forEach(tr => {
+    const sold = parseFloat(tr.children[5].querySelector('input').value) || 0;
+    const price = parseFloat(tr.children[11].querySelector('input').value) || 0;
+    salesTotal += sold * price;
+  });
+  let expenseTotal = 0;
+  document.querySelectorAll('#expenseTable tbody tr').forEach(tr => {
+    expenseTotal += parseFloat(tr.children[1].querySelector('input').value) || 0;
+  });
+  let incomeTotal = 0;
+  document.querySelectorAll('#incomeTable tbody tr').forEach(tr => {
+    incomeTotal += parseFloat(tr.children[1].querySelector('input').value) || 0;
+  });
+  const meituan = parseFloat(document.getElementById('fMeituan').value) || 0;
+  const networkFee = parseFloat(document.getElementById('fNetworkFee').value) || 0;
+  const cashBegin = parseFloat(document.getElementById('fCashBegin').value) || 0;
+  const totalIncome = networkFee + salesTotal + incomeTotal;
+  const cash = totalIncome + cashBegin - expenseTotal - meituan;
+
+  document.getElementById('tbMeituan').textContent = '¥' + meituan.toFixed(2);
+  document.getElementById('tbNet').textContent = '¥' + networkFee.toFixed(2);
+  document.getElementById('tbSales').textContent = '¥' + salesTotal.toFixed(2);
+  document.getElementById('tbExpense').textContent = '¥' + expenseTotal.toFixed(2);
+  document.getElementById('tbCash').textContent = '¥' + cash.toFixed(2);
+  document.getElementById('cashEnd').textContent = '¥' + cash.toFixed(2);
+  document.getElementById('fCashEnd').value = cash.toFixed(2);
+  updateDiff();
+}
+
+// ── 收集 & 保存 ──
+function collectData() {
+  const sales = [];
+  document.querySelectorAll('#salesTable tbody tr').forEach(tr => {
+    sales.push({
+      product_name: tr.children[1].querySelector('input').value,
+      begin_stock: parseFloat(tr.children[2].querySelector('input').value) || 0,
+      restock: parseFloat(tr.children[3].querySelector('input').value) || 0,
+      sold: parseFloat(tr.children[5].querySelector('input').value) || 0,
+      end_stock: parseFloat(tr.children[4].querySelector('input').value) || 0,
+        unit_price: parseFloat(tr.children[11].querySelector('input').value) || 0,
+      capacity: parseFloat(tr.children[12].querySelector('input').value) || 0,
+    });
+  });
+  const expenses = [];
+  document.querySelectorAll('#expenseTable tbody tr').forEach(tr => {
+    const cbs = tr.querySelectorAll('input[type=checkbox]');
+    let pt = '';
+    if (cbs[0] && cbs[0].checked) pt = '吧台支付';
+    else if (cbs[1] && cbs[1].checked) pt = '财务支付';
+    expenses.push({
+      item: tr.children[0].querySelector('input').value,
+      amount: parseFloat(tr.children[1].querySelector('input').value) || 0,
+      payment_type: pt,
+    });
+  });
+  const income = [];
+  document.querySelectorAll('#incomeTable tbody tr').forEach(tr => {
+    income.push({
+      item: tr.children[0].querySelector('input').value,
+      amount: parseFloat(tr.children[1].querySelector('input').value) || 0,
+    });
+  });
+  const txns = [];
+  document.querySelectorAll('#txnTable tbody tr').forEach((tr, i) => {
+    txns.push({
+      seq: i + 1,
+      product_name: tr.children[1].querySelector('input').value,
+      product_type: tr.children[2].querySelector('input').value,
+      coupon: tr.children[3].querySelector('input').value,
+      actual_paid: parseFloat(tr.children[4].querySelector('input').value) || 0,
+      merchant_subsidy: parseFloat(tr.children[5].querySelector('input').value) || 0,
+      duration: tr.children[6].querySelector('input').value,
+      user_phone: tr.children[7].querySelector('input').value,
+      remark: tr.children[8].querySelector('input').value,
+      verify_code: tr.children[9].querySelector('input').value,
+      fee_type: parseFloat(tr.children[10].querySelector('input').value) || 0,
+    });
+  });
+  let salesTotal = 0;
+  sales.forEach(s => salesTotal += s.sold * s.unit_price);
+  let expenseTotal = 0;
+  expenses.forEach(e => expenseTotal += e.amount);
+  let incomeTotal = 0;
+  income.forEach(i => incomeTotal += i.amount);
+  return {
+    shift: {
+      operator: document.getElementById('fOperator').value,
+      meituan: parseFloat(document.getElementById('fMeituan').value) || 0,
+      network_fee: parseFloat(document.getElementById('fNetworkFee').value) || 0,
+      network_fee_due: parseFloat(document.getElementById('fNetworkFeeDue').value) || 0,
+      sales: salesTotal,
+      expense_total: expenseTotal,
+      refund_total: incomeTotal,
+      cash_begin: parseFloat(document.getElementById('fCashBegin').value) || 0,
+      cash_end: parseFloat(document.getElementById('fCashEnd').value) || 0,
+      notes: document.getElementById('fNotes').value,
+      status: currentShift ? currentShift.shift.status : 'open',
+    },
+    sales_items: sales,
+    expenses: expenses,
+    income_items: income,
+    transactions: txns,
+  };
+}
+
+async function saveShift() {
+  if (!currentShift) return;
+  const data = collectData();
+  const r = await fetch(`/api/shifts/${currentShift.shift.id}`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)
+  });
+  const d = await r.json();
+  currentShift = d.data;
+  renderShift(d.data);
+  toast('已保存', 'ok');
+}
+
+async function closeShift() {
+  if (!currentShift) return;
+  if (currentShift.shift.status === 'closed') { toast('该班次已交班', 'err'); return; }
+  if (!confirm('确认交班？将自动创建下一班次')) return;
+  const data = collectData();
+  data.shift.status = 'closed';
+  const r = await fetch(`/api/shifts/${currentShift.shift.id}`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)
+  });
+  if (!r.ok) { toast('交班失败：' + (await r.json()).error, 'err'); return; }
+  const cur = currentShift.shift;
+  let nextDate = cur.shift_date, nextType = '晚班';
+  if (cur.shift_type === '晚班') {
+    const d = new Date(cur.shift_date); d.setDate(d.getDate() + 1);
+    nextDate = d.toISOString().slice(0,10); nextType = '白班';
+  }
+  const r2 = await fetch('/api/shifts', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({date: nextDate, shift_type: nextType, operator: cur.operator})
+  });
+  const d2 = await r2.json();
+  currentShift = d2.data;
+  renderShift(d2.data);
+  toast('已交班，下一班次已创建', 'ok');
+}
+
+function toast(msg, type) {
+  const t = document.createElement('div');
+  t.className = 'toast ' + (type || 'ok');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.classList.add('show'), 10);
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2500);
+}
+
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveShift(); }
+});
+</script>
+</body>
+</html>

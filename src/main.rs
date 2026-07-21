@@ -1,0 +1,2168 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+use actix_web::{web, App, HttpServer, HttpResponse};
+use chrono::{Datelike, Local};
+use log::{info, warn};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::process::Command;
+use std::sync::{Mutex, TryLockError};
+use std::time::Duration;
+
+// This will be removed - the frontend now doesn't call query() on init
+// The frontend version is in meituan_query.html
+
+// ═══════════════════════════════════════════════════════════════════
+//  日志系统：输出到文件 meituan-rs.log
+// ═══════════════════════════════════════════════════════════════════
+
+fn init_logging(log_dir: &str) {
+    let log_path = format!("{}/meituan-rs.log", log_dir);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .unwrap_or_else(|e| panic!("无法创建日志文件 {}: {}", log_path, e));
+    
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .filter(Some("actix_server"), log::LevelFilter::Error)
+        .filter(Some("actix_web"), log::LevelFilter::Error)
+        .target(env_logger::Target::Pipe(Box::new(file)))
+        .format(|buf, record| {
+            use std::io::Write;
+            let now = chrono::Local::now();
+            let level = match record.level() {
+                log::Level::Error => "❌",
+                log::Level::Warn => "⚠️",
+                log::Level::Info => "✅",
+                log::Level::Debug => "🔍",
+                log::Level::Trace => "📝",
+            };
+            writeln!(buf, "{} [{}] {}",
+                now.format("%Y-%m-%d %H:%M:%S"),
+                level,
+                record.args()
+            )
+        })
+        .init();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Models
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Order {
+    pub coupon_value: Option<String>,
+    pub product_info: Option<String>,
+    pub product_type: Option<String>,
+    pub sale_price: Option<String>,
+    pub discount_price: Option<String>,
+    pub consume_date: Option<String>,
+    pub mobile: Option<String>,
+    pub description: Option<String>,
+    pub shop_info: Option<String>,
+    pub is_refunded: bool,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ProductStat {
+    pub name: String,
+    pub count: i64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct MonthlyStat {
+    pub month: String,
+    pub count: i64,
+    pub fee_total: f64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct StatsResponse {
+    pub total: i64,
+    pub refunded: i64,
+    pub min_date: Option<String>,
+    pub max_date: Option<String>,
+    pub products: Vec<ProductStat>,
+    pub monthly: Vec<MonthlyStat>,
+    pub shifts: HashMap<String, i64>,
+    pub build_version: String,
+}
+
+/// 从编译时注入的 BUILD_TIME 环境变量获取版本号
+fn get_build_version() -> String {
+    format!("v{}", env!("BUILD_TIME"))
+}
+/// 按计费规则计算订单计费价(读取 settings.json 的 fee_json, 无配置则用默认规则)
+struct FeePlan {
+    cat: String,
+    plan: String,
+    fee: f64,
+}
+
+fn load_fee_plans(exe_dir: &str) -> Vec<FeePlan> {
+    let sp = format!("{}/settings.json", exe_dir);
+    if let Ok(s) = std::fs::read_to_string(&sp) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            if let Some(fj) = v.get("fee_json").and_then(|x| x.as_str()) {
+                if let Ok(plans) = serde_json::from_str::<Vec<serde_json::Value>>(fj) {
+                    return plans.into_iter().filter_map(|p| {
+                        let cat = p.get("cat").and_then(|x| x.as_str())?.to_string();
+                        let plan = p.get("plan").and_then(|x| x.as_str())?.to_string();
+                        let fee = p.get("fee").and_then(|x| x.as_f64())?;
+                        Some(FeePlan { cat, plan, fee })
+                    }).collect();
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+fn calc_fee(plans: &[FeePlan], pi: &str) -> f64 {
+    for p in plans {
+        if !p.cat.is_empty() && !p.plan.is_empty() && pi.contains(&p.cat) && pi.contains(&p.plan) {
+            return p.fee;
+        }
+    }
+    // 默认规则(与前端 getFeePlans 一致)
+    if pi.contains("包天") && !pi.contains("普通区") && !pi.contains("骑手") { return 100.0; }
+    if pi.contains("电竞") && pi.contains("包天") { return 110.0; }
+    if pi.contains("包夜") && pi.contains("电竞") { return 55.0; }
+    if pi.contains("通宵") { return 78.0; }
+    if pi.contains("包夜") && pi.contains("网游") { return 45.0; }
+    if pi.contains("包夜") && pi.contains("普通") { return 30.0; }
+    if pi.contains("包夜") { return 40.0; }
+    if pi.contains("包早") { return 25.0; }
+    if pi.contains("包天") && pi.contains("普通") { return 70.0; }
+    if pi.contains("包天") && pi.contains("网游") { return 90.0; }
+    if pi.contains("5070") && pi.contains("4小时") { return 44.0; }
+    if pi.contains("5070") && pi.contains("3小时") { return 34.0; }
+    if pi.contains("4小时") && pi.contains("网游") { return 36.0; }
+    if pi.contains("4小时") { return 40.0; }
+    if pi.contains("3小时") && pi.contains("网游") { return 26.0; }
+    if pi.contains("3小时") { return 30.0; }
+    if pi.contains("新会员") { return 30.0; }
+    if pi.contains("生日") { return 66.0; }
+    if pi.contains("会员卡") || pi.contains("网费") || pi.contains("送") {
+        if pi.contains("充1000") { return 30.0; }
+        if pi.contains("1000") { return 1000.0; }
+        return 100.0;
+    }
+    30.0 // 默认
+}
+
+
+#[derive(Serialize, Debug)]
+pub struct QueryResponse {
+    pub total: i64,
+    pub rows: Vec<Order>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DetailProduct {
+    pub name: String,
+    pub total: i64,
+    pub refunded: i64,
+    pub revenue: f64,
+    pub day_shift: i64,
+    pub night_shift: i64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DetailResponse {
+    pub products: Vec<DetailProduct>,
+    pub trends: HashMap<String, HashMap<String, i64>>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct HealthResponse {
+    pub status: String,
+    pub total_rows: i64,
+    pub min_db_date: Option<String>,
+    pub max_db_date: Option<String>,
+    pub cookie_status: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RefreshResponse {
+    pub new: i64,
+    pub updated: i64,
+    pub time: String,
+    pub errors: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct ColumnSetting {
+    pub id: String,
+    pub vis: bool,
+    pub copy: bool,
+}
+
+impl Default for ColumnSetting {
+    fn default() -> Self {
+        Self { id: String::new(), vis: true, copy: true }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct ShiftSetting {
+    pub day_start: Vec<i32>,   // [8, 0]
+    pub day_end: Vec<i32>,     // [20, 0]
+    pub night_start: Vec<i32>, // [20, 0]
+    pub night_end: Vec<i32>,   // [8, 0]
+}
+
+impl Default for ShiftSetting {
+    fn default() -> Self {
+        Self {
+            day_start: vec![8, 0],
+            day_end: vec![20, 0],
+            night_start: vec![20, 0],
+            night_end: vec![8, 0],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct Settings {
+    #[serde(skip)]
+    pub key_info: bool,
+    #[serde(skip)]
+    pub columns: Vec<ColumnSetting>,
+    pub shift: ShiftSetting,
+    pub fee_json: String,
+    #[serde(skip)]
+    pub copy_header: bool,
+    pub month_start_cal: bool,
+    pub month_end_prev: bool,
+    pub auto_login: bool,
+    pub cookie_raw: String,
+    pub refresh_interval_secs: i64,
+    pub auto_open_browser: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let default_fee = serde_json::json!([
+            {"cat":"新会员","plan":"特惠","fee":30},{"cat":"新会员","plan":"女神","fee":30},{"cat":"新会员","plan":"超值","fee":100},
+            {"cat":"5070显卡","plan":"3小时","fee":34},{"cat":"5070显卡","plan":"4小时","fee":44},{"cat":"5070显卡","plan":"包天","fee":110},
+            {"cat":"网游区","plan":"3小时","fee":26},{"cat":"网游区","plan":"4小时","fee":36},{"cat":"网游区","plan":"包天","fee":90},
+            {"cat":"网游区","plan":"包早","fee":25},{"cat":"网游区","plan":"包夜","fee":45},
+            {"cat":"普通区","plan":"包夜","fee":30},{"cat":"普通区","plan":"包天","fee":70},
+            {"cat":"老会员","plan":"生日","fee":66},{"cat":"电竞区5070","plan":"通宵","fee":55},
+            {"cat":"1000网费","plan":"送500","fee":1000},{"cat":"100网费","plan":"送20","fee":100}
+        ]);
+        Self {
+            key_info: false,
+            columns: vec![
+                ColumnSetting{id:"product_info".into(),vis:true,copy:true},
+                ColumnSetting{id:"product_type".into(),vis:true,copy:true},
+                ColumnSetting{id:"coupon_value".into(),vis:true,copy:true},
+                ColumnSetting{id:"sale_price".into(),vis:true,copy:true},
+                ColumnSetting{id:"discount_price".into(),vis:true,copy:true},
+                ColumnSetting{id:"financial".into(),vis:false,copy:false},
+                ColumnSetting{id:"consume_date".into(),vis:true,copy:true},
+                ColumnSetting{id:"mobile".into(),vis:true,copy:true},
+                ColumnSetting{id:"description".into(),vis:true,copy:true},
+                ColumnSetting{id:"shop_info".into(),vis:true,copy:true},
+                ColumnSetting{id:"fee".into(),vis:true,copy:false},
+            ],
+            shift: ShiftSetting{
+                day_start:vec![8,0], day_end:vec![20,0],
+                night_start:vec![20,0], night_end:vec![8,0],
+            },
+            fee_json: default_fee.to_string(),
+            copy_header: false,
+            month_start_cal: false,
+            month_end_prev: false,
+            auto_login: true,
+            cookie_raw: "".into(),
+            refresh_interval_secs: 60,
+            auto_open_browser: false,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  App State
+// ═══════════════════════════════════════════════════════════════════
+
+pub struct AppState {
+    pub db: Pool<SqliteConnectionManager>,
+    pub cookie_file: String,
+    pub html_dir: String,
+    pub exe_dir: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Database
+// ═══════════════════════════════════════════════════════════════════
+
+fn init_db(pool: &Pool<SqliteConnectionManager>) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = pool.get()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coupon_value TEXT UNIQUE,
+            order_id TEXT,
+            product_info TEXT,
+            product_type TEXT,
+            sale_price TEXT,
+            discount_price TEXT,
+            consume_date TEXT,
+            mobile TEXT,
+            description TEXT,
+            shop_info TEXT,
+            verify_account TEXT,
+            is_refunded INTEGER DEFAULT 0,
+            extra_json TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_consume_date ON orders(consume_date);
+        CREATE INDEX IF NOT EXISTS idx_coupon_value ON orders(coupon_value);
+        CREATE INDEX IF NOT EXISTS idx_is_refunded ON orders(is_refunded);"
+    )?;
+    info!("数据库初始化完成");
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Handlers
+// ═══════════════════════════════════════════════════════════════════
+
+fn json_ok<T: Serialize>(data: T) -> HttpResponse {
+    HttpResponse::Ok()
+        .insert_header(("X-Content-Type-Options", "nosniff"))
+        .insert_header(("Cache-Control", "no-store"))
+        .content_type("application/json; charset=utf-8")
+        .json(data)
+}
+
+fn json_err(e: String) -> HttpResponse {
+    HttpResponse::InternalServerError()
+        .insert_header(("X-Content-Type-Options", "nosniff"))
+        .insert_header(("Cache-Control", "no-store"))
+        .content_type("application/json; charset=utf-8")
+        .json(serde_json::json!({"error": e}))
+}
+
+async fn handle_index(state: web::Data<AppState>) -> HttpResponse {
+    let path = format!("{}/meituan_query.html", state.html_dir);
+    match fs::read_to_string(&path) {
+        Ok(html) => HttpResponse::Ok()
+            .insert_header(("X-Content-Type-Options", "nosniff"))
+            .insert_header(("Cache-Control", "no-store, must-revalidate"))
+            .insert_header(("Pragma", "no-cache"))
+            .insert_header(("Expires", "0"))
+            .content_type("text/html; charset=utf-8")
+            .body(html),
+        Err(e) => HttpResponse::NotFound().insert_header(("X-Content-Type-Options", "nosniff")).body(format!("Page not found: {}", e)),
+    }
+}
+
+async fn handle_settings_page(state: web::Data<AppState>) -> HttpResponse {
+    let path = format!("{}/meituan_settings.html", state.html_dir);
+    match fs::read_to_string(&path) {
+        Ok(html) => HttpResponse::Ok()
+            .insert_header(("X-Content-Type-Options", "nosniff"))
+            .insert_header(("Cache-Control", "no-store, must-revalidate"))
+            .content_type("text/html; charset=utf-8")
+            .body(html),
+        Err(e) => HttpResponse::NotFound().insert_header(("X-Content-Type-Options", "nosniff")).body(format!("Settings page not found: {}", e)),
+    }
+}
+
+
+
+async fn handle_logo(state: web::Data<AppState>) -> HttpResponse {
+    let path = format!("{}/logo.png", state.html_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => HttpResponse::Ok()
+            .content_type("image/png")
+            .body(bytes),
+        Err(e) => HttpResponse::NotFound().body(format!("Logo not found: {}", e)),
+    }
+}
+
+async fn handle_health(state: web::Data<AppState>) -> HttpResponse {
+    let cookie_ok = std::path::Path::new(&state.cookie_file).exists();
+    match state.db.get() {
+        Ok(conn) => {
+            let total = db_total(&conn);
+            let (mn, mx) = db_daterange(&conn);
+            json_ok(HealthResponse {
+                status: "ok".into(),
+                total_rows: total,
+                min_db_date: mn,
+                max_db_date: mx,
+                cookie_status: if cookie_ok { "ok".into() } else { "missing".into() },
+            })
+        }
+        Err(e) => json_err(format!("{}", e)),
+    }
+}
+
+fn db_total(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM orders", [], |r| r.get(0)).unwrap_or(0)
+}
+fn db_refunded(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM orders WHERE is_refunded=1", [], |r| r.get(0)).unwrap_or(0)
+}
+fn db_daterange(conn: &rusqlite::Connection) -> (Option<String>, Option<String>) {
+    conn.query_row("SELECT MIN(consume_date), MAX(consume_date) FROM orders", [],
+        |r| Ok((r.get(0)?, r.get(1)?))).unwrap_or((None, None))
+}
+
+async fn handle_stats(state: web::Data<AppState>) -> HttpResponse {
+    match state.db.get() {
+        Ok(conn) => {
+            let total = db_total(&conn);
+            let refunded = db_refunded(&conn);
+            let (mn, mx) = db_daterange(&conn);
+
+            let products = match conn.prepare(
+                "SELECT product_info, COUNT(*) FROM orders GROUP BY product_info ORDER BY COUNT(*) DESC"
+            ) {
+                Ok(mut stmt) => stmt.query_map([], |r| Ok(ProductStat { name: r.get(0)?, count: r.get(1)? }))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<ProductStat>>())
+                    .unwrap_or_default(),
+                Err(_) => vec![],
+            };
+
+            // 月度统计：订单数 + 计费价合计
+            let plans = load_fee_plans(&state.exe_dir);
+            let monthly_data = match conn.prepare(
+                "SELECT strftime('%Y-%m', datetime(consume_date, '-8 hours')) as m, product_info FROM orders WHERE product_info IS NOT NULL AND product_info != '' AND is_refunded = 0"
+            ) {
+                Ok(mut stmt) => {
+                    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                        .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<(String, String)>>())
+                        .unwrap_or_default();
+                    let mut map: HashMap<String, (i64, f64)> = HashMap::new();
+                    for (month, pi) in rows {
+                        let fee = calc_fee(&plans, &pi);
+                        let entry = map.entry(month).or_insert((0, 0.0));
+                        entry.0 += 1;
+                        entry.1 += fee;
+                    }
+                    let mut v: Vec<MonthlyStat> = map.into_iter()
+                        .map(|(m, (c, f))| MonthlyStat { month: m, count: c, fee_total: f })
+                        .collect();
+                    v.sort_by(|a, b| a.month.cmp(&b.month));
+                    v
+                }
+                Err(_) => vec![],
+            };
+
+            let shifts = match conn.prepare(
+                "SELECT CASE WHEN CAST(strftime('%H',consume_date) AS INTEGER)>=8 \
+                 AND CAST(strftime('%H',consume_date) AS INTEGER)<20 THEN 'day' ELSE 'night' END as s, \
+                 COUNT(*) FROM orders GROUP BY s"
+            ) {
+                Ok(mut stmt) => stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<HashMap<String, i64>>())
+                    .unwrap_or_default(),
+                Err(_) => HashMap::new(),
+            };
+
+	            json_ok(StatsResponse { total, refunded, min_date: mn, max_date: mx, products, monthly: monthly_data, shifts, build_version: get_build_version() })
+        }
+        Err(e) => json_err(format!("{}", e)),
+    }
+}
+
+async fn handle_query(
+    state: web::Data<AppState>,
+    query: web::Query<HashMap<String, String>>,
+) -> HttpResponse {
+    match state.db.get() {
+        Ok(conn) => {
+            let mut cond: Vec<String> = Vec::new();
+            let mut vals: Vec<String> = Vec::new();
+
+            if let Some(s) = query.get("beginDate") {
+                cond.push("consume_date >= ?".into());
+                vals.push(s.clone());
+            }
+            if let Some(e) = query.get("endDate") {
+                cond.push("consume_date <= ?".into());
+                vals.push(e.clone());
+            }
+            if let Some(p) = query.get("productInfo") {
+                cond.push("product_info LIKE ?".into());
+                vals.push(format!("%{}%", p));
+            }
+            if let Some(c) = query.get("couponValue") {
+                cond.push("coupon_value LIKE ?".into());
+                vals.push(format!("%{}%", c));
+            }
+            if let Some(m) = query.get("mobile") {
+                cond.push("mobile LIKE ?".into());
+                vals.push(format!("%{}%", m));
+            }
+            if let Some(r) = query.get("isRefunded") {
+                if r == "0" || r == "1" {
+                    cond.push(format!("is_refunded={}", r));
+                }
+            }
+            let limit: i64 = query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(2000);
+            let offset: i64 = query.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+
+            let where_sql = if cond.is_empty() { "1=1".into() } else { cond.join(" AND ") };
+            let total: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM orders WHERE {}", where_sql),
+                    rusqlite::params_from_iter(vals.iter()), |r| r.get(0))
+                .unwrap_or(0);
+
+            let sql = format!(
+                "SELECT coupon_value,product_info,product_type,sale_price, \
+                 discount_price,consume_date,mobile,description,shop_info,is_refunded \
+                 FROM orders WHERE {} ORDER BY consume_date DESC LIMIT ? OFFSET ?",
+                where_sql
+            );
+            let mut all_vals = vals.clone();
+            all_vals.push(limit.to_string());
+            all_vals.push(offset.to_string());
+
+            let rows = match conn.prepare(&sql) {
+                Ok(mut stmt) => stmt
+                    .query_map(rusqlite::params_from_iter(all_vals.iter()), |r| {
+                        Ok(Order {
+                            coupon_value: r.get::<_, Option<String>>(0).unwrap_or(None),
+                            product_info: r.get::<_, Option<String>>(1).unwrap_or(None),
+                            product_type: r.get::<_, Option<String>>(2).unwrap_or(None),
+                            sale_price: r.get::<_, Option<String>>(3).unwrap_or(None),
+                            discount_price: r.get::<_, Option<String>>(4).unwrap_or(None),
+                            consume_date: r.get::<_, Option<String>>(5).unwrap_or(None),
+                            mobile: r.get::<_, Option<String>>(6).unwrap_or(None),
+                            description: r.get::<_, Option<String>>(7).unwrap_or(None),
+                            shop_info: r.get::<_, Option<String>>(8).unwrap_or(None),
+                            is_refunded: r.get::<_, i64>(9).unwrap_or(0) != 0,
+                        })
+                    })
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<Order>>())
+                    .unwrap_or_default(),
+                Err(_) => vec![],
+            };
+
+            json_ok(QueryResponse { total, rows })
+        }
+        Err(e) => json_err(format!("{}", e)),
+    }
+}
+
+async fn handle_stats_detail(state: web::Data<AppState>, query: web::Query<HashMap<String, String>>) -> HttpResponse {
+    match state.db.get() {
+        Ok(conn) => {
+            // 确定统计周期: monthly/quarterly/semi/annual
+            let period = query.get("period").map(|s| s.as_str()).unwrap_or("monthly");
+            // 确定年度起始年，默认当前年
+            let year: i32 = query.get("year").and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                chrono::Local::now().year()
+            });
+            let year_start = format!("{}-01-01 08:00:00", year);
+            let year_end = format!("{}-01-01 08:00:00", year + 1);
+
+            // 构建周期列表
+            let periods = build_periods(year, period);
+
+            let mut result_periods: Vec<serde_json::Value> = Vec::new();
+            let mut year_total = 0i64;
+            let mut year_fee = 0.0;
+            let mut year_day_count = 0i64;
+            let mut year_night_count = 0i64;
+            let mut year_day_fee = 0.0;
+            let mut year_night_fee = 0.0;
+
+            let plans = load_fee_plans(&state.exe_dir);
+            for (label, p_start, p_end) in &periods {
+                // 统计该周期
+                let sql = "SELECT COUNT(*), \
+                    SUM(CASE WHEN CAST(strftime('%H',consume_date) AS INTEGER)>=8 \
+                        AND CAST(strftime('%H',consume_date) AS INTEGER)<20 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN NOT(CAST(strftime('%H',consume_date) AS INTEGER)>=8 \
+                        AND CAST(strftime('%H',consume_date) AS INTEGER)<20) THEN 1 ELSE 0 END), \
+                    product_info \
+                    FROM orders WHERE consume_date>=? AND consume_date<=? AND is_refunded=0 GROUP BY product_info";
+                let mut stmt = match conn.prepare(sql) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let rows = stmt.query_map(rusqlite::params![p_start, p_end], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?))
+                }).ok().map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>()).unwrap_or_default();
+
+                let mut p_total = 0i64;
+                let mut p_day_count = 0i64;
+                let mut p_night_count = 0i64;
+                let mut p_fee = 0.0;
+                let mut p_day_fee = 0.0;
+                let mut p_night_fee = 0.0;
+
+                for (total, day, night, pi) in rows {
+                    let fee = calc_fee(&plans, &pi);
+                    p_total += total;
+                    p_day_count += day;
+                    p_night_count += night;
+                    p_fee += fee * (total as f64);
+                    p_day_fee += fee * (day as f64);
+                    p_night_fee += fee * (night as f64);
+                }
+
+                year_total += p_total;
+                year_fee += p_fee;
+                year_day_count += p_day_count;
+                year_night_count += p_night_count;
+                year_day_fee += p_day_fee;
+                year_night_fee += p_night_fee;
+
+                let mut period_obj = serde_json::json!({
+                    "label": label,
+                    "start": p_start,
+                    "end": p_end,
+                    "total": p_total,
+                    "fee_total": (p_fee * 100.0).round() / 100.0,
+                    "day": {"count": p_day_count, "fee": (p_day_fee * 100.0).round() / 100.0},
+                    "night": {"count": p_night_count, "fee": (p_night_fee * 100.0).round() / 100.0},
+                });
+
+                // 月度视图：列出每天明细
+                if period == "monthly" {
+                    let daily = build_daily_breakdown(&conn, &state.exe_dir, p_start, p_end);
+                    period_obj["days"] = serde_json::json!(daily);
+                }
+
+                result_periods.push(period_obj);
+            }
+
+            let resp = serde_json::json!({
+                "period": period,
+                "year": year,
+                "year_start": year_start,
+                "year_end": year_end,
+                "summary": {
+                    "total": year_total,
+                    "fee_total": (year_fee * 100.0).round() / 100.0,
+                    "day": {"count": year_day_count, "fee": (year_day_fee * 100.0).round() / 100.0},
+                    "night": {"count": year_night_count, "fee": (year_night_fee * 100.0).round() / 100.0},
+                },
+                "periods": result_periods,
+            });
+            json_ok(resp)
+        }
+        Err(e) => json_err(format!("{}", e)),
+    }
+}
+
+/// 构建周期列表
+fn build_periods(year: i32, period: &str) -> Vec<(String, String, String)> {
+    match period {
+        "quarterly" => {
+            vec![
+                ("Q1".into(), format!("{}-01-01 08:00:00", year), format!("{}-04-01 08:00:00", year)),
+                ("Q2".into(), format!("{}-04-01 08:00:00", year), format!("{}-07-01 08:00:00", year)),
+                ("Q3".into(), format!("{}-07-01 08:00:00", year), format!("{}-10-01 08:00:00", year)),
+                ("Q4".into(), format!("{}-10-01 08:00:00", year), format!("{}-01-01 08:00:00", year + 1)),
+            ]
+        }
+        "semi" => {
+            vec![
+                ("上半年".into(), format!("{}-01-01 08:00:00", year), format!("{}-07-01 08:00:00", year)),
+                ("下半年".into(), format!("{}-07-01 08:00:00", year), format!("{}-01-01 08:00:00", year + 1)),
+            ]
+        }
+        "annual" => {
+            vec![
+                ("全年".into(), format!("{}-01-01 08:00:00", year), format!("{}-01-01 08:00:00", year + 1)),
+            ]
+        }
+        _ => { // monthly
+            let mut v = Vec::new();
+            for m in 1..=12 {
+                let start = format!("{:04}-{:02}-01 08:00:00", year, m);
+                let end = if m == 12 {
+                    format!("{:04}-01-01 08:00:00", year + 1)
+                } else {
+                    format!("{:04}-{:02}-01 08:00:00", year, m + 1)
+                };
+                v.push((format!("{}月", m), start, end));
+            }
+            v
+        }
+    }
+}
+
+/// 月度视图：每天白班/夜班明细
+fn build_daily_breakdown(conn: &rusqlite::Connection, exe_dir: &str, start: &str, end: &str) -> Vec<serde_json::Value> {
+    let plans = load_fee_plans(exe_dir);
+    let sql = "SELECT consume_date, product_info FROM orders WHERE consume_date>=? AND consume_date<=? AND is_refunded=0";
+    let mut stmt = match conn.prepare(sql) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let rows = stmt.query_map(rusqlite::params![start, end], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    }).ok().map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>()).unwrap_or_default();
+
+    // Key: "MM-DD", Value: (day_count, day_fee, night_count, night_fee)
+    let mut daily_map: std::collections::HashMap<String, (i64, f64, i64, f64)> = std::collections::HashMap::new();
+
+    for (cdate, pi) in rows {
+        if cdate.len() < 10 { continue; }
+        let date_key = cdate[5..10].to_string(); // 提取 MM-DD
+        let fee = calc_fee(&plans, &pi);
+
+        // 判断班次（根据小时是否在8~20点之间）
+        let is_day_shift = if let Some(hour_str) = cdate.split(' ').nth(1).and_then(|t| t.split(':').next()) {
+            if let Ok(h) = hour_str.parse::<i32>() {
+                h >= 8 && h < 20
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+
+        let entry = daily_map.entry(date_key).or_insert((0, 0.0, 0, 0.0));
+        if is_day_shift {
+            entry.0 += 1;
+            entry.1 += fee;
+        } else {
+            entry.2 += 1;
+            entry.3 += fee;
+        }
+    }
+
+    let mut sorted_keys: Vec<String> = daily_map.keys().cloned().collect();
+    sorted_keys.sort();
+
+    sorted_keys.iter().map(|k| {
+        let &(day, day_fee, night, night_fee) = daily_map.get(k).unwrap();
+        serde_json::json!({
+            "date": k,
+            "day": {"count": day, "fee": (day_fee * 100.0).round() / 100.0},
+            "night": {"count": night, "fee": (night_fee * 100.0).round() / 100.0},
+        })
+    }).collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  数据刷新（调用Python脚本，requests库更稳定）
+// ═══════════════════════════════════════════════════════════════════
+
+static REFRESH_LOCK: Mutex<()> = Mutex::new(());
+
+fn rust_refresh(exe_dir: &str, deep: bool) -> RefreshResponse {
+    let _refresh_guard = match REFRESH_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => {
+            return RefreshResponse {
+                new: 0,
+                updated: 0,
+                time: Local::now().format("%H:%M:%S").to_string(),
+                errors: vec!["已有同步任务正在运行，请稍后再试".into()],
+            };
+        }
+        Err(TryLockError::Poisoned(_)) => {
+            return RefreshResponse {
+                new: 0,
+                updated: 0,
+                time: Local::now().format("%H:%M:%S").to_string(),
+                errors: vec!["同步锁异常，请重启程序".into()],
+            };
+        }
+    };
+    let now = Local::now().format("%H:%M:%S").to_string();
+    let cookie_file = format!("{}/meituan_cookies.json", exe_dir);
+    let db_path = format!("{}/meituan_orders.db", exe_dir);
+
+    // 1. 读取 Cookie
+    let cookie_str = match std::fs::read_to_string(&cookie_file) {
+        Ok(content) => {
+            match serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                Ok(arr) => {
+                    arr.iter()
+                        .filter_map(|c| {
+                            let name = c.get("name")?.as_str()?;
+                            let value = c.get("value")?.as_str()?;
+                            Some(format!("{}={}", name, value))
+                        }).collect::<Vec<_>>().join("; ")
+                }
+                Err(_) => String::new(),
+            }
+        }
+        Err(e) => return RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("Cookie read: {}", e)] },
+    };
+
+    if cookie_str.is_empty() {
+        return RefreshResponse { new: 0, updated: 0, time: now, errors: vec!["No cookies".into()] };
+    }
+
+    // 2. 打开数据库
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => return RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("DB: {}", e)] },
+    };
+
+    // 3. 获取最新时间
+    let latest: String = conn.query_row(
+        "SELECT COALESCE(MAX(consume_date),'2026-01-01 00:00:00') FROM orders", [],
+        |r| r.get(0),
+    ).unwrap_or_else(|_| "2026-01-01 00:00:00".into());
+
+    let mut start_ts = chrono::NaiveDateTime::parse_from_str(&latest, "%Y-%m-%d %H:%M:%S")
+        .map(|dt| {
+            use chrono::TimeZone;
+            chrono::FixedOffset::east_opt(8 * 3600)
+                .and_then(|offset| offset.from_local_datetime(&dt).earliest())
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(0)
+        }).unwrap_or(0);
+
+    // 💡 苹果风双轨智能查找窗口设计：
+    // - deep = false (高频短轮询，默认): 前推 15 分钟，快速检验 10 分钟内可能发生的“撤销核销”（失踪）订单
+    // - deep = true (深度对账轮询): 前推 50 小时，全面覆盖 48 小时自动退款时效
+    let lookback_ms = if deep {
+        50 * 3600 * 1000 // 50 小时
+    } else {
+        15 * 60 * 1000 // 15 分钟
+    };
+
+    if start_ts > lookback_ms {
+        start_ts -= lookback_ms;
+    }
+    let end_ts = chrono::Utc::now().timestamp_millis();
+
+    // 4. 调用美团 API 并滑动拉取
+    let api_url = "https://e.dianping.com/couponrecord/queryCouponRecordDetails?yodaReady=h5&csecplatform=4&csecversion=4.2.4";
+    let mut all_records: Vec<serde_json::Value> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    const MAX_SLICE_MS: i64 = 3 * 24 * 3600 * 1000; // 3天滑动切片
+    let mut current_start = start_ts;
+
+    while current_start < end_ts {
+        let current_end = std::cmp::min(current_start + MAX_SLICE_MS, end_ts);
+
+        for page in 0..50 {
+            let payload = serde_json::json!({
+                "dealGroupIds":"","bussinessType":0,"shopIds":"0","productTabNum":1,
+                "offset": page*100, "limit":100,
+                "beginDate": current_start, "endDate": current_end,
+                "subTabNum":null, "isConsumeMedical":false
+            });
+            let config = ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build();
+            let agent = ureq::Agent::new_with_config(config);
+            match agent.post(api_url)
+                .header("User-Agent", "Mozilla/5.0")
+                .header("Content-Type", "application/json")
+                .header("Origin", "https://e.dianping.com")
+                .header("Referer", "https://e.dianping.com/app/np-mer-voucher-web-static/records")
+                .header("Cookie", &cookie_str)
+                .send_json(&payload)
+            {
+                Ok(mut resp) => {
+                    let data: serde_json::Value = match resp.body_mut().read_json() {
+                        Ok(d) => d,
+                        Err(e) => { errors.push(format!("JSON: {}", e)); break; }
+                    };
+                    let d = data.get("data").and_then(|v| v.as_object()).cloned();
+                    if let Some(d) = d {
+                        if page == 0 && d.get("recordSum").and_then(|v| v.as_i64()).unwrap_or(0) == 0 { break; }
+                        if let Some(recs) = d.get("couponRecordDetails").and_then(|v| v.as_array()) {
+                            if recs.is_empty() { break; }
+                            all_records.extend(recs.to_vec());
+                            let total: i64 = d.get("recordSum").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if (page + 1) * 100 >= total { break; }
+                        } else { break; }
+                    } else { break; }
+                }
+                Err(e) => {
+                    // 检测 Cookie 过期（401/403）并给出明确提示
+                    let msg = format!("{:?}", e);
+                    if msg.contains("401") || msg.contains("403") || msg.contains("未登录") {
+                        errors.push("Cookie 已过期，请在浏览器重新登录美团商家后台后刷新 meituan_cookies.json".into());
+                    } else {
+                        errors.push(format!("HTTP page {}: {}", page, e));
+                    }
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+
+        if !errors.is_empty() {
+            break;
+        }
+        current_start = current_end;
+    }
+
+    if !errors.is_empty() {
+        return RefreshResponse { new: 0, updated: 0, time: now, errors };
+    }
+
+    // 5. 写入数据库（INSERT OR REPLACE = upsert，避免 exists-check 竞态）
+    let mut new_count = 0i64;
+    let mut updated_count = 0i64;
+    if !all_records.is_empty() {
+        for rec in &all_records {
+            let coupon = rec.get("couponValue").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if coupon.is_empty() { continue; }
+            let desc = rec.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let ir = if desc.contains("退款") || desc.contains("退费") || desc.contains("已退") || desc.contains("撤销") || desc.contains("撤单") { 1 } else { 0 };
+            let new_pi = rec.get("productInfo").and_then(|v| v.as_str()).unwrap_or("");
+            let new_pt = rec.get("productTypeName").and_then(|v| v.as_str()).unwrap_or("");
+            let new_sp = rec.get("salePrice").and_then(|v| v.as_str()).unwrap_or("");
+            let new_dp = rec.get("discountPrice").and_then(|v| v.as_str()).unwrap_or("");
+            let new_cd = rec.get("consumeDate").and_then(|v| v.as_str()).unwrap_or("");
+            let new_mb = rec.get("mobile").and_then(|v| v.as_str()).unwrap_or("");
+            let new_si = rec.get("consumeShopInfo").and_then(|v| v.as_str()).unwrap_or("");
+
+            // 检查记录是否已存在，以及是否有字段实际变化
+            let existing = conn.query_row(
+                "SELECT product_info,product_type,sale_price,discount_price,consume_date,mobile,description,shop_info,is_refunded FROM orders WHERE coupon_value = ?",
+                [&coupon],
+                |r| Ok((
+                    r.get::<_, String>(0).unwrap_or_default(),
+                    r.get::<_, String>(1).unwrap_or_default(),
+                    r.get::<_, String>(2).unwrap_or_default(),
+                    r.get::<_, String>(3).unwrap_or_default(),
+                    r.get::<_, String>(4).unwrap_or_default(),
+                    r.get::<_, String>(5).unwrap_or_default(),
+                    r.get::<_, String>(6).unwrap_or_default(),
+                    r.get::<_, String>(7).unwrap_or_default(),
+                    r.get::<_, i64>(8).unwrap_or_default(),
+                ))
+            ).ok();
+
+            let changed = match &existing {
+                None => true, // 新记录
+                Some((pi, pt, sp, dp, cd, mb, de, si, old_ir)) => {
+                    // 只有当至少一个字段实际变化时才计为"更新"
+                    pi != new_pi || pt != new_pt || sp != new_sp || dp != new_dp ||
+                    cd != new_cd || mb != new_mb || de != desc || si != new_si || *old_ir != ir as i64
+                }
+            };
+
+            // 原子 upsert
+            conn.execute(
+                "INSERT INTO orders (coupon_value,product_info,product_type,sale_price,\
+                 discount_price,consume_date,mobile,description,shop_info,is_refunded,updated_at) \
+                 VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) \
+                 ON CONFLICT(coupon_value) DO UPDATE SET \
+                 product_info=excluded.product_info,product_type=excluded.product_type,\
+                 sale_price=excluded.sale_price,discount_price=excluded.discount_price,\
+                 consume_date=excluded.consume_date,mobile=excluded.mobile,\
+                 description=excluded.description,shop_info=excluded.shop_info,\
+                 is_refunded=excluded.is_refunded,updated_at=CURRENT_TIMESTAMP",
+                rusqlite::params![&coupon, new_pi, new_pt, new_sp, new_dp, new_cd, new_mb, desc, new_si, ir]
+            ).unwrap_or(0);
+
+            if existing.is_none() { new_count += 1; }
+            else if changed { updated_count += 1; }
+            // 如果存在且无变化，不计入任何统计
+        }
+    }
+
+    // 6. 自动检测历史“撤销核销”（美团在撤销核销后，会直接从已核销列表中物理删除此订单，导致增量接口不再返回它）
+    // 比对本地最近 24 小时内的正常订单与本次拉回的记录集，找出缺失项并置为已撤销
+    use chrono::TimeZone;
+    let start_dt = chrono::FixedOffset::east_opt(8 * 3600)
+        .unwrap()
+        .timestamp_opt(start_ts / 1000, 0)
+        .unwrap();
+    let start_date_str = start_dt.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let mut local_active_orders: Vec<(String, String)> = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT coupon_value, consume_date FROM orders WHERE consume_date >= ? AND is_refunded = 0") {
+        let rows = stmt.query_map(rusqlite::params![&start_date_str], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }).ok().map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>()).unwrap_or_default();
+        local_active_orders = rows;
+    }
+
+    let mut api_coupon_set = std::collections::HashSet::new();
+    for rec in &all_records {
+        if let Some(coupon) = rec.get("couponValue").and_then(|v| v.as_str()) {
+            api_coupon_set.insert(coupon.to_string());
+        }
+    }
+
+    let mut revoked_count = 0i64;
+    let now_ts = chrono::Utc::now().timestamp_millis();
+    for (coupon, consume_date) in local_active_orders {
+        if !api_coupon_set.contains(&coupon) {
+            // 解析本地消费日期
+            let order_ts = chrono::NaiveDateTime::parse_from_str(&consume_date, "%Y-%m-%d %H:%M:%S")
+                .map(|dt| {
+                    use chrono::TimeZone;
+                    chrono::FixedOffset::east_opt(8 * 3600)
+                        .and_then(|offset| offset.from_local_datetime(&dt).earliest())
+                        .map(|t| t.timestamp_millis())
+                        .unwrap_or(0)
+                }).unwrap_or(0);
+            // 排除 2 分钟以内新核销的临时分页延迟订单，确保判定准确
+            if now_ts - order_ts > 120_000 {
+                let _ = conn.execute(
+                    "UPDATE orders SET is_refunded = 1, description = '[已撤销]', updated_at = CURRENT_TIMESTAMP WHERE coupon_value = ?",
+                    rusqlite::params![&coupon]
+                );
+                revoked_count += 1;
+            }
+        }
+    }
+
+    RefreshResponse { new: new_count, updated: updated_count + revoked_count, time: now, errors }
+}
+
+async fn handle_refresh(
+    state: web::Data<AppState>,
+    query: web::Query<HashMap<String, String>>,
+) -> HttpResponse {
+    let deep = query.get("deep").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let exe_dir = state.exe_dir.clone();
+    let result = tokio::task::spawn_blocking(move || rust_refresh(&exe_dir, deep))
+        .await
+        .unwrap_or_else(|e| RefreshResponse {
+            new: 0,
+            updated: 0,
+            time: Local::now().format("%H:%M:%S").to_string(),
+            errors: vec![format!("刷新任务异常: {}", e)],
+        });
+    json_ok(result)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  设置文件读写（全局，多人共享）
+// ═══════════════════════════════════════════════════════════════════
+
+fn load_settings() -> Settings {
+    let p = res_path("settings.json");
+    let mut s = if let Ok(content) = std::fs::read_to_string(&p) {
+        serde_json::from_str::<Settings>(&content).unwrap_or_default()
+    } else {
+        Settings::default()
+    };
+
+    normalize_settings(&mut s);
+    // 安全要求：GET /api/settings 只返回状态配置，绝不回传 meituan_cookies.json 原文。
+    s.cookie_raw.clear();
+    s
+}
+
+fn normalize_settings(s: &mut Settings) {
+    let defaults = ShiftSetting::default();
+    if s.shift.day_start.len() != 2 { s.shift.day_start = defaults.day_start.clone(); }
+    if s.shift.day_end.len() != 2 { s.shift.day_end = defaults.day_end.clone(); }
+    if s.shift.night_start.len() != 2 { s.shift.night_start = defaults.night_start.clone(); }
+    if s.shift.night_end.len() != 2 { s.shift.night_end = defaults.night_end.clone(); }
+    s.refresh_interval_secs = s.refresh_interval_secs.clamp(5, 3600);
+}
+
+fn save_settings(s: &Settings) -> Result<(), String> {
+    // 如果前端更新了 cookie_raw 且非空，直接同步写回后端 meituan_cookies.json
+    if !s.cookie_raw.trim().is_empty() {
+        let cookie_path = res_path("meituan_cookies.json");
+        std::fs::write(&cookie_path, &s.cookie_raw).map_err(|e| format!("Cookie 写入失败: {}", e))?;
+    }
+
+    let mut persisted = s.clone();
+    normalize_settings(&mut persisted);
+    persisted.cookie_raw.clear();
+
+    let p = res_path("settings.json");
+    let json = serde_json::to_string_pretty(&persisted).map_err(|e| format!("{}", e))?;
+    std::fs::write(&p, json).map_err(|e| format!("{}", e))?;
+    Ok(())
+}
+
+async fn handle_get_settings(_state: web::Data<AppState>) -> HttpResponse {
+    let s = load_settings();
+    json_ok(s)
+}
+
+async fn handle_put_settings(_state: web::Data<AppState>, body: web::Json<Settings>) -> HttpResponse {
+    match save_settings(&body.into_inner()) {
+        Ok(()) => json_ok(serde_json::json!({"ok":true})),
+        Err(e) => json_err(e),
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  Cookie 登录工具
+// ═══════════════════════════════════════════════════════════════════
+
+/// 以启动时的工作目录为基准解析相对路径（cookie/db 在项目根目录）
+fn res_path(rel: &str) -> String {
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join(rel)
+        .to_string_lossy()
+        .to_string()
+}
+
+const CDP_PORT: &str = "9222";
+const MEITUAN_URL: &str = "https://e.dianping.com/app/merchant-platform/543c7d5810bd431?iUrl=Ly9lLmRpYW5waW5nLmNvbS9hcHAvbnAtbWVyLXZvdWNoZXItd2ViLXN0YXRpYy9yZWNvcmRz";
+
+fn cookie_file_path() -> String { res_path("meituan_cookies.json") }
+
+fn ensure_cookies() -> bool {
+    // 检查已有cookie
+    let cpath = cookie_file_path();
+    if std::path::Path::new(&cpath).exists() {
+        if let Ok(content) = fs::read_to_string(&cpath) {
+            if let Ok(cookies) = serde_json::from_str::<Vec<Value>>(&content) {
+                if cookies.len() > 5 {
+                    info!("Cookie: {} 个，无需重新登录", cookies.len());
+                    return true;
+                }
+            }
+        }
+    }
+
+    println!("\n============================================================");
+    println!("  首次使用：需要登录美团商家后台");
+    println!("============================================================");
+
+    if wait_for_cdp_fast().is_err() {
+        // CDP 不存在时主动启动 Edge，而不是直接放弃首次登录
+        let edge = find_edge();
+        if edge.is_none() {
+            println!("  ⚠️  未找到 Edge 浏览器，跳过自动登录");
+            return false;
+        }
+
+        println!("  🌐 正在打开浏览器...");
+        let _browser = Command::new(edge.unwrap())
+            .args([
+                &format!("--remote-debugging-port={}", CDP_PORT),
+                "--no-first-run", "--no-default-browser-check",
+                MEITUAN_URL,
+            ])
+            .spawn();
+
+        std::thread::sleep(Duration::from_secs(3));
+        if wait_for_cdp().is_err() {
+            warn!("CDP启动超时，无法自动提取Cookie");
+            return false;
+        }
+    } else {
+        info!("检测到已有 CDP 浏览器会话，复用登录窗口");
+    }
+
+    println!("\n  请在浏览器窗口中手动登录");
+    println!("  登录后脚本会自动提取Cookie并启动服务\n");
+
+    // 等待登录
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(300) {
+        std::thread::sleep(Duration::from_secs(2));
+        if let Ok(resp) = http_get(&format!("http://127.0.0.1:{}/json", CDP_PORT)) {
+            if let Ok(pages) = serde_json::from_str::<Vec<Value>>(&resp) {
+                let dp = pages.iter().find(|p| {
+                    p["url"].as_str().map(|u| u.contains("dianping")).unwrap_or(false)
+                });
+                if let Some(p) = dp {
+                    let url = p["url"].as_str().unwrap_or("");
+                    let ws = p["webSocketDebuggerUrl"].as_str().unwrap_or("");
+                    if url.contains("dianping") && !url.contains("login") && !url.contains("passport") && !ws.is_empty() {
+                        if let Ok(cookies) = get_cookies_via_cdp(ws) {
+                            let dp_count = cookies.iter().filter(|c| {
+                                c["domain"].as_str().map(|d| d.contains("dianping")).unwrap_or(false)
+                            }).count();
+                            if dp_count > 5 {
+                                let cpath = cookie_file_path();
+                                let _ = fs::write(&cpath, serde_json::to_string_pretty(&cookies).unwrap());
+                                println!("\n  ✅ 登录成功！已保存 {} 个 cookie", cookies.len());
+                                println!("  ✅ 浏览器可以关闭了，服务已启动\n");
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let elapsed = start.elapsed().as_secs();
+        if elapsed.is_multiple_of(15) && elapsed > 0 {
+            print!("\r  等待登录... ({}s)", elapsed);
+            let _ = std::io::stdout().flush();
+        }
+    }
+    println!("\n  ⚠️  登录超时");
+    false
+}
+
+fn find_edge() -> Option<String> {
+    for p in &[
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ] { if std::path::Path::new(p).exists() { return Some(p.to_string()); } }
+    None
+}
+
+fn wait_for_cdp() -> Result<(), String> {
+    for _ in 0..30 {
+        if http_get(&format!("http://127.0.0.1:{}/json/version", CDP_PORT)).is_ok() { return Ok(()); }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    Err("CDP timeout".into())
+}
+
+fn wait_for_cdp_fast() -> Result<(), String> {
+    // 5秒快速检测，用于启动时判断是否需要弹出浏览器
+    for _ in 0..5 {
+        if http_get(&format!("http://127.0.0.1:{}/json/version", CDP_PORT)).is_ok() { return Ok(()); }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    Err("CDP not available".into())
+}
+
+fn get_cookies_via_cdp(ws_url: &str) -> Result<Vec<Value>, String> {
+    let (mut ws, _) = tungstenite::connect(ws_url).map_err(|e| format!("WS: {}", e))?;
+    let cmd = json!({"id": 1, "method": "Network.getAllCookies", "params": {}});
+    ws.send(tungstenite::Message::Text(serde_json::to_string(&cmd).unwrap().into()))
+        .map_err(|e| format!("send: {}", e))?;
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > Duration::from_secs(30) {
+            return Err("CDP cookie获取超时(30s)".into());
+        }
+        let msg = match ws.read() {
+            Ok(m) => m,
+            Err(_) => continue, // Timeout, retry
+        };
+        if let tungstenite::Message::Text(text) = msg {
+            if let Ok(resp) = serde_json::from_str::<Value>(&text) {
+                if resp.get("id").and_then(|v| v.as_i64()) == Some(1) {
+                    return Ok(resp["result"]["cookies"].as_array().map(|a| {
+                        a.iter().map(|c| json!({
+                            "name": c["name"], "value": c["value"],
+                            "domain": c["domain"], "path": c["path"],
+                        })).collect()
+                    }).unwrap_or_default());
+                }
+            }
+        }
+    }
+}
+
+fn http_get(url: &str) -> Result<String, String> {
+    let u: url::Url = url.parse().map_err(|e| format!("{}", e))?;
+    let addr = format!("{}:{}", u.host_str().unwrap_or("127.0.0.1"), u.port().unwrap_or(80));
+    let mut stream = TcpStream::connect(&addr).map_err(|e| format!("{}", e))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n", u.path(), u.host_str().unwrap_or(""));
+    stream.write_all(req.as_bytes()).map_err(|e| format!("{}", e))?;
+    let mut reader = BufReader::new(stream);
+    let mut body = String::new();
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if line.trim().is_empty() { break; } // End of headers
+            }
+            Err(_) => break,
+        }
+    }
+    reader.read_to_string(&mut body).ok();
+    Ok(body)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  实例检查：同版本不重开，新版本强制重启
+// ═══════════════════════════════════════════════════════════════════
+
+fn check_existing_instance(port: &str) -> Option<bool> {
+    // 返回值: None=无实例运行, Some(true)=已关闭旧进程, Some(false)=同版本运行中
+    let url = format!("http://127.0.0.1:{}/api/stats", port);
+    match http_get(&url) {
+        Ok(body) => {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(remote) = v["build_version"].as_str() {
+                    let my_ver = get_build_version();
+                    if remote == my_ver {
+                        info!("同版本实例已在运行 ({}), 跳过启动", remote);
+                        return Some(false);
+                    }
+                    info!("发现旧版本实例 ({} → {}), 关闭旧进程", remote, my_ver);
+                    kill_process_on_port(port);
+                    return Some(true);
+                }
+            }
+            // 无法解析版本，也关掉
+            info!("发现不兼容实例, 关闭旧进程");
+            kill_process_on_port(port);
+            Some(true)
+        }
+        Err(_) => None,
+    }
+}
+
+fn open_browser_url(url: &str) {
+    let _ = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+}
+
+fn kill_process_on_port(port: &str) {
+    // 通过 netstat 查找端口对应的 PID
+    let output = std::process::Command::new("cmd")
+        .args([
+            "/c",
+            &format!("netstat -ano | findstr :{}", port),
+        ])
+        .output()
+        .ok();
+    if let Some(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            if line.contains("LISTENING") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(pid_str) = parts.last() {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        info!("正在关闭旧进程 PID={}", pid);
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/f", "/pid", &pid.to_string()])
+                            .output();
+                        // 等待端口释放
+                        for _ in 0..10 {
+                            if http_get(&format!("http://127.0.0.1:{}", port)).is_err() {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(300));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    // 保底：杀掉所有同名进程（一般不触发，因为新进程还未绑定端口）
+    let _ = std::process::Command::new("taskkill")
+        .args(["/f", "/im", "meituan-rs.exe"])
+        .output();
+    std::thread::sleep(Duration::from_secs(1));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  System Tray (Windows)
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(windows)]
+mod tray {
+    use tray_icon::menu::*;
+    use tray_icon::{Icon, TrayIconEvent};
+    use log::info;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static LAST_OPEN_MS: AtomicU64 = AtomicU64::new(0);
+
+    // Win32 message pump FFI
+    mod win32 {
+        #[repr(C)] pub struct POINT { pub x: i32, pub y: i32 }
+        #[repr(C)] pub struct MSG { pub hwnd: isize, pub message: u32, pub wparam: usize, pub lparam: isize, pub time: u32, pub pt: POINT }
+        extern "system" {
+            pub fn GetMessageW(msg: *mut MSG, hwnd: isize, wMsgFilterMin: u32, wMsgFilterMax: u32) -> i32;
+            pub fn TranslateMessage(msg: *const MSG) -> i32;
+            pub fn DispatchMessageW(msg: *const MSG) -> isize;
+        }
+    }
+
+    fn create_icon() -> Icon {
+        let size = 32u32;
+        let half = size as f32 / 2.0;
+        let radius = half - 1.2;
+        let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+        let (my0, my1, _ml, _mr, center) = (5.0, 27.0, 7.0, 25.0, 16.0);
+        for y in 0..size {
+            for x in 0..size {
+                let (dx, dy) = (x as f32 - half, y as f32 - half);
+                if (dx * dx + dy * dy).sqrt() > radius {
+                    rgba.extend_from_slice(&[0,0,0,0]); continue;
+                }
+                let in_m = if (y as f32) < my0 || (y as f32) > my1 { false }
+                    else if (x as f32) <= 11.0 || (x as f32) >= 21.0 { true }
+                    else { let t = (y as f32 - my0)/(my1-my0); let vl = 11.0+(center-11.0)*t; let vr = 21.0-(21.0-center)*t; (x as f32) < vl || (x as f32) > vr };
+                rgba.extend_from_slice(if in_m { &[255,255,255,255] } else { &[255,209,0,255] });
+            }
+        }
+        Icon::from_rgba(rgba, size, size).expect("tray icon")
+    }
+
+    fn open_browser(port: &str, suffix: &str) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        // 使用 CAS 原子锁进行线程安全的防抖校验与更新，防止微秒级并发绕过
+        let res = LAST_OPEN_MS.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
+            if now >= last && now - last < 800 {
+                None // 💡 800ms 内拒绝更新，触发拦截
+            } else {
+                Some(now) // 💡 允许更新为当前时间
+            }
+        });
+
+        if res.is_err() {
+            return; // 💡 拦截成功，直接退出
+        }
+
+        let url = format!("http://localhost:{}{}", port, suffix);
+        // cmd /c start opens default browser, reuses existing tab
+        let _ = std::process::Command::new("cmd").args(["/c","start","",&url]).spawn();
+    }
+
+    fn build_menu() -> Menu {
+        let menu = Menu::new();
+        let open = MenuItemBuilder::new().id(MenuId::new("open")).text("打开管理台").enabled(true).build();
+        let settings_center = MenuItemBuilder::new().id(MenuId::new("settings_center")).text("打开设置中心").enabled(true).build();
+        let refresh_fast = MenuItemBuilder::new().id(MenuId::new("refresh_fast")).text("快速同步（15分钟）").enabled(true).build();
+        let refresh_deep = MenuItemBuilder::new().id(MenuId::new("refresh_deep")).text("深度对账（50小时）").enabled(true).build();
+        let quick_settings = MenuItemBuilder::new().id(MenuId::new("quick_settings")).text("快速设置（原生）").enabled(true).build();
+        let fee_settings = MenuItemBuilder::new().id(MenuId::new("fee_settings")).text("计费规则").enabled(true).build();
+        let cookie_settings = MenuItemBuilder::new().id(MenuId::new("cookie_settings")).text("凭证与安全").enabled(true).build();
+        let open_dir = MenuItemBuilder::new().id(MenuId::new("open_dir")).text("打开配置目录").enabled(true).build();
+        let open_log = MenuItemBuilder::new().id(MenuId::new("open_log")).text("打开运行日志").enabled(true).build();
+        let status = MenuItemBuilder::new().id(MenuId::new("status")).text("服务状态").enabled(true).build();
+        let about = MenuItemBuilder::new().id(MenuId::new("about")).text("关于").enabled(true).build();
+        let quit = MenuItemBuilder::new().id(MenuId::new("quit")).text("退出服务").enabled(true).build();
+
+        let sync_menu = SubmenuBuilder::new()
+            .text("数据同步")
+            .enabled(true)
+            .items(&[&refresh_fast, &refresh_deep])
+            .build()
+            .expect("sync submenu");
+        let settings_menu = SubmenuBuilder::new()
+            .text("设置")
+            .enabled(true)
+            .items(&[&settings_center, &quick_settings, &fee_settings, &cookie_settings])
+            .build()
+            .expect("settings submenu");
+        let tools_menu = SubmenuBuilder::new()
+            .text("工具")
+            .enabled(true)
+            .items(&[&status, &open_dir, &open_log])
+            .build()
+            .expect("tools submenu");
+
+        let sep1 = PredefinedMenuItem::separator();
+        let sep2 = PredefinedMenuItem::separator();
+        let sep3 = PredefinedMenuItem::separator();
+        let _ = menu.append_items(&[&open, &sep1, &sync_menu, &settings_menu, &tools_menu, &sep2, &about, &sep3, &quit]);
+        menu
+    }
+
+    fn open_path(path: &str) {
+        let _ = std::process::Command::new("cmd").args(["/c", "start", "", path]).spawn();
+    }
+
+    fn run_refresh_in_background(exe_dir: &str, deep: bool) {
+        let exe_dir = exe_dir.to_string();
+        std::thread::spawn(move || {
+            let s = crate::rust_refresh(&exe_dir, deep);
+            let msg = if s.errors.is_empty() {
+                format!("同步完成\n+{} 新订单\n{} 条更新\n完成时间：{}", s.new, s.updated, s.time)
+            } else {
+                format!("同步未完成\n{}", s.errors.join("\n"))
+            };
+            show_msgbox("美团订单管理", &msg);
+        });
+    }
+
+    fn handle_menu(event: &MenuEvent, exe_dir: &str, port: &str) {
+        match event.id().as_ref() {
+            "open" => open_browser(port, ""),
+            "settings_center" => open_browser(port, "/#settings"),
+            "fee_settings" => open_browser(port, "/#fee"),
+            "cookie_settings" => open_browser(port, "/#settings-system"),
+            "refresh_fast" => run_refresh_in_background(exe_dir, false),
+            "refresh_deep" => run_refresh_in_background(exe_dir, true),
+            "quick_settings" => {
+                std::thread::spawn(|| unsafe { show_native_settings_dialog(); });
+            }
+            "status" => {
+                show_msgbox("服务状态", &format!("服务运行中\n本机地址：http://localhost:{}\n配置目录：{}", port, exe_dir));
+            }
+            "open_dir" => open_path(exe_dir),
+            "open_log" => open_path(&format!("{}\\meituan-rs.log", exe_dir)),
+            "about" => {
+                show_msgbox("关于", &format!("美团订单管理系统 v{}\n\nhttp://localhost:{}", env!("CARGO_PKG_VERSION"), port));
+            }
+            "quit" => {
+                info!("用户退出");
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
+    fn show_msgbox(title: &str, msg: &str) {
+        use std::os::windows::ffi::OsStrExt;
+        use std::ffi::OsStr;
+        let title_wide: Vec<u16> = OsStr::new(title).encode_wide().chain(std::iter::once(0)).collect();
+        let msg_wide: Vec<u16> = OsStr::new(msg).encode_wide().chain(std::iter::once(0)).collect();
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                std::ptr::null_mut(),
+                msg_wide.as_ptr(),
+                title_wide.as_ptr(),
+                0, // MB_OK
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  原生 Win32 设置对话框 — 绝不打开浏览器，直接修改 settings.json
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// 对话框控件 ID
+    const IDC_EDIT_DAY_START: i32 = 1001;
+    const IDC_EDIT_DAY_END: i32 = 1002;
+    const IDC_EDIT_NIGHT_START: i32 = 1003;
+    const IDC_EDIT_NIGHT_END: i32 = 1004;
+    const IDC_EDIT_REFRESH: i32 = 1005;
+    const IDC_CHECK_AUTO_OPEN: i32 = 1006;
+    const IDC_CHECK_AUTO_LOGIN: i32 = 1007;
+    const IDC_CHECK_MONTH_CAL: i32 = 1010;
+    const IDC_CHECK_MONTH_PREV: i32 = 1011;
+    const IDC_BTN_OK: i32 = 1012;
+    const IDC_BTN_CANCEL: i32 = 1013;
+
+    // Win32 常量
+    const GWLP_USERDATA: i32 = -21;
+    const BST_CHECKED: usize = 0x0001;
+    const BM_GETCHECK: u32 = 0x00F0;
+    const BM_SETCHECK: u32 = 0x00F1;
+
+    /// 对话框上下文（放置于堆上，通过 GWLP_USERDATA 传递给窗口过程）
+    struct DlgCtx {
+        settings: *mut crate::Settings,
+        result: *mut bool,
+        done: *mut bool,
+        hwnd_day_start: windows_sys::Win32::Foundation::HWND,
+        hwnd_day_end: windows_sys::Win32::Foundation::HWND,
+        hwnd_night_start: windows_sys::Win32::Foundation::HWND,
+        hwnd_night_end: windows_sys::Win32::Foundation::HWND,
+        hwnd_refresh: windows_sys::Win32::Foundation::HWND,
+        hwnd_auto_open: windows_sys::Win32::Foundation::HWND,
+        hwnd_auto_login: windows_sys::Win32::Foundation::HWND,
+        hwnd_month_cal: windows_sys::Win32::Foundation::HWND,
+        hwnd_month_prev: windows_sys::Win32::Foundation::HWND,
+    }
+
+    unsafe extern "system" fn dlg_wnd_proc(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
+        match msg {
+            // WM_CREATE = 0x0001
+            0x0001 => {
+                let create = &*(lparam as *const windows_sys::Win32::UI::WindowsAndMessaging::CREATESTRUCTW);
+                let ctx = Box::from_raw((*create).lpCreateParams as *mut DlgCtx);
+
+                // 保存 ctx 到窗口属性
+                windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
+                0
+            }
+            // WM_COMMAND = 0x0111
+            0x0111 => {
+                let id = (wparam & 0xFFFF) as i32;
+                let ctx_ptr = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DlgCtx;
+                if !ctx_ptr.is_null() {
+                    let ctx = &mut *ctx_ptr;
+                    if id == IDC_BTN_OK {
+                        save_settings_from_dialog(ctx);
+                        *ctx.result = true;
+                        windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                        return 0;
+                    }
+                    if id == IDC_BTN_CANCEL {
+                        *ctx.result = false;
+                        windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                        return 0;
+                    }
+                }
+                // 让 DefWindowProc 也处理
+                windows_sys::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            // WM_CLOSE = 0x0010
+            0x0010 => {
+                let ctx_ptr = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DlgCtx;
+                if !ctx_ptr.is_null() {
+                    let ctx = &mut *ctx_ptr;
+                    *ctx.result = false;
+                }
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                0
+            }
+            // WM_DESTROY = 0x0002
+            0x0002 => {
+                // 结束当前设置对话框循环，但不退出托盘主消息循环
+                let ctx_ptr = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DlgCtx;
+                if !ctx_ptr.is_null() {
+                    let ctx = &mut *ctx_ptr;
+                    *ctx.done = true;
+                    let _ = Box::from_raw(ctx_ptr);
+                    windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                0
+            }
+            _ => windows_sys::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg as u32, wparam, lparam),
+        }
+    }
+
+    /// 从对话框读取值并保存到 settings
+    unsafe fn save_settings_from_dialog(ctx: &mut DlgCtx) {
+        let s = &mut *ctx.settings;
+
+        // 读取 Edit 控件文本（辅助函数）
+        unsafe fn read_edit(hwnd: windows_sys::Win32::Foundation::HWND) -> String {
+            let len = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextLengthW(hwnd);
+            if len <= 0 { return String::new(); }
+            let mut buf = vec![0u16; (len + 1) as usize];
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, buf.as_mut_ptr(), len + 1);
+            let slice = &buf[..len as usize];
+            String::from_utf16_lossy(slice)
+        }
+
+        // 读取班次时间
+        let ds = read_edit(ctx.hwnd_day_start);
+        let de = read_edit(ctx.hwnd_day_end);
+        let ns = read_edit(ctx.hwnd_night_start);
+        let ne = read_edit(ctx.hwnd_night_end);
+
+        if let Some((h, m)) = parse_hm(&ds) { s.shift.day_start = vec![h, m]; }
+        if let Some((h, m)) = parse_hm(&de) { s.shift.day_end = vec![h, m]; }
+        if let Some((h, m)) = parse_hm(&ns) { s.shift.night_start = vec![h, m]; }
+        if let Some((h, m)) = parse_hm(&ne) { s.shift.night_end = vec![h, m]; }
+
+        // 读取刷新间隔
+        let refresh_str = read_edit(ctx.hwnd_refresh);
+        if let Ok(secs) = refresh_str.trim().parse::<i64>() {
+            if secs >= 5 && secs <= 3600 {
+                s.refresh_interval_secs = secs;
+            }
+        }
+
+        // 读取系统开关
+        s.auto_open_browser = windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+            ctx.hwnd_auto_open, BM_GETCHECK, 0, 0
+        ) == BST_CHECKED as isize;
+        s.auto_login = windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+            ctx.hwnd_auto_login, BM_GETCHECK, 0, 0
+        ) == BST_CHECKED as isize;
+        s.month_start_cal = windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+            ctx.hwnd_month_cal, BM_GETCHECK, 0, 0
+        ) == BST_CHECKED as isize;
+        s.month_end_prev = windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+            ctx.hwnd_month_prev, BM_GETCHECK, 0, 0
+        ) == BST_CHECKED as isize;
+
+        // 写入 settings.json
+        let _ = crate::save_settings(s);
+        info!("设置已保存: refresh={}s, auto_open={}, shift={:?}",
+            s.refresh_interval_secs, s.auto_open_browser, s.shift);
+    }
+
+    /// 解析 "08:00" 格式的字符串为 (小时, 分钟)
+    fn parse_hm(s: &str) -> Option<(i32, i32)> {
+        let parts: Vec<&str> = s.trim().split(':').collect();
+        if parts.len() == 2 {
+            if let (Ok(h), Ok(m)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
+                if h >= 0 && h <= 23 && m >= 0 && m <= 59 {
+                    return Some((h, m));
+                }
+            }
+        }
+        None
+    }
+
+    /// 显示原生 Win32 设置对话框（绝不打开浏览器）
+    unsafe fn show_native_settings_dialog() {
+        use std::os::windows::ffi::OsStrExt;
+        use std::ffi::OsStr;
+        use std::mem;
+
+        fn to_wstr(s: &str) -> Vec<u16> {
+            OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        // 加载当前设置
+        let mut settings = crate::load_settings();
+
+        // 注册窗口类
+        let h_instance = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null_mut());
+        let cls_name = to_wstr("MeituanSettingsDlg");
+        let wc = windows_sys::Win32::UI::WindowsAndMessaging::WNDCLASSEXW {
+            cbSize: mem::size_of::<windows_sys::Win32::UI::WindowsAndMessaging::WNDCLASSEXW>() as u32,
+            style: windows_sys::Win32::UI::WindowsAndMessaging::CS_HREDRAW | windows_sys::Win32::UI::WindowsAndMessaging::CS_VREDRAW,
+            lpfnWndProc: Some(dlg_wnd_proc),
+            hInstance: h_instance,
+            hCursor: windows_sys::Win32::UI::WindowsAndMessaging::LoadCursorW(std::ptr::null_mut(), windows_sys::Win32::UI::WindowsAndMessaging::IDC_ARROW),
+            hbrBackground: std::ptr::null_mut(),
+            lpszClassName: cls_name.as_ptr(),
+            ..mem::zeroed()
+        };
+        windows_sys::Win32::UI::WindowsAndMessaging::RegisterClassExW(&wc);
+
+        // 计算窗口居中位置
+        let screen_w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(0);  // SM_CXSCREEN
+        let screen_h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(1);  // SM_CYSCREEN
+        let dlg_w = 560i32;
+        let dlg_h = 520i32;
+        let x = (screen_w - dlg_w) / 2;
+        let y = (screen_h - dlg_h) / 2;
+
+        // 初始化 DlgCtx
+        let result_ptr = Box::into_raw(Box::new(false));
+        let done_ptr = Box::into_raw(Box::new(false));
+        let ctx = Box::new(DlgCtx {
+            settings: &mut settings,
+            result: result_ptr,
+            done: done_ptr,
+            hwnd_day_start: std::ptr::null_mut(),
+            hwnd_day_end: std::ptr::null_mut(),
+            hwnd_night_start: std::ptr::null_mut(),
+            hwnd_night_end: std::ptr::null_mut(),
+            hwnd_refresh: std::ptr::null_mut(),
+            hwnd_auto_open: std::ptr::null_mut(),
+            hwnd_auto_login: std::ptr::null_mut(),
+            hwnd_month_cal: std::ptr::null_mut(),
+            hwnd_month_prev: std::ptr::null_mut(),
+        });
+        let ctx_ptr = Box::into_raw(ctx);
+
+        // 创建对话框主窗口
+        let title = to_wstr("⚙️ 系统设置 — 美团订单管理");
+        let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_DLGMODALFRAME,
+            cls_name.as_ptr(),
+            title.as_ptr(),
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_POPUP | windows_sys::Win32::UI::WindowsAndMessaging::WS_CAPTION | windows_sys::Win32::UI::WindowsAndMessaging::WS_SYSMENU,
+            x, y, dlg_w, dlg_h,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            h_instance,
+            ctx_ptr as *const std::ffi::c_void,
+        );
+
+        if hwnd.is_null() {
+            // 窗口创建失败，释放 ctx 和结果指针
+            let _ = Box::from_raw(ctx_ptr);
+            let _ = Box::from_raw(result_ptr);
+            let _ = Box::from_raw(done_ptr);
+            return;
+        }
+
+        // 创建子控件（使用 DS_SHELLFONT 风格并设置字体）
+        let child_style = windows_sys::Win32::UI::WindowsAndMessaging::WS_CHILD | windows_sys::Win32::UI::WindowsAndMessaging::WS_VISIBLE;
+        let label_style = child_style;
+        let btn_checkbox_style = child_style | windows_sys::Win32::UI::WindowsAndMessaging::BS_AUTOCHECKBOX as u32;
+        let edit_style = child_style | windows_sys::Win32::UI::WindowsAndMessaging::WS_BORDER | windows_sys::Win32::UI::WindowsAndMessaging::ES_AUTOHSCROLL as u32;
+        let btn_style = child_style | windows_sys::Win32::UI::WindowsAndMessaging::BS_DEFPUSHBUTTON as u32;
+
+        // 获取 ctx 来存储控件句柄
+        let ctx_ref = &mut *ctx_ptr;
+
+        let mut cy = 16i32;
+        let lx = 24i32;
+        let ex = 260i32;
+        let ew = 220i32;
+        let lh = 22i32;
+
+        // ═══ 班次设置 ═══
+        let _fc = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("── 班次时间设置 ──").as_ptr(),
+            label_style, lx, cy, 340, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        cy += lh + 4;
+
+        // 白班开始
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("白班开始时间 (HH:MM):").as_ptr(),
+            label_style, lx, cy, 170, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        ctx_ref.hwnd_day_start = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_CLIENTEDGE, to_wstr("EDIT").as_ptr(),
+            to_wstr(&format!("{:02}:{:02}", settings.shift.day_start[0], settings.shift.day_start[1])).as_ptr(),
+            edit_style | windows_sys::Win32::UI::WindowsAndMessaging::ES_CENTER as u32, ex, cy, ew, lh + 4, hwnd, IDC_EDIT_DAY_START as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        cy += lh + 8;
+
+        // 白班结束
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("白班结束时间 (HH:MM):").as_ptr(),
+            label_style, lx, cy, 170, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        ctx_ref.hwnd_day_end = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_CLIENTEDGE, to_wstr("EDIT").as_ptr(),
+            to_wstr(&format!("{:02}:{:02}", settings.shift.day_end[0], settings.shift.day_end[1])).as_ptr(),
+            edit_style | windows_sys::Win32::UI::WindowsAndMessaging::ES_CENTER as u32, ex, cy, ew, lh + 4, hwnd, IDC_EDIT_DAY_END as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        cy += lh + 8;
+
+        // 夜班开始
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("夜班开始时间 (HH:MM):").as_ptr(),
+            label_style, lx, cy, 170, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        ctx_ref.hwnd_night_start = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_CLIENTEDGE, to_wstr("EDIT").as_ptr(),
+            to_wstr(&format!("{:02}:{:02}", settings.shift.night_start[0], settings.shift.night_start[1])).as_ptr(),
+            edit_style | windows_sys::Win32::UI::WindowsAndMessaging::ES_CENTER as u32, ex, cy, ew, lh + 4, hwnd, IDC_EDIT_NIGHT_START as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        cy += lh + 8;
+
+        // 夜班结束
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("夜班结束时间 (HH:MM):").as_ptr(),
+            label_style, lx, cy, 170, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        ctx_ref.hwnd_night_end = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_CLIENTEDGE, to_wstr("EDIT").as_ptr(),
+            to_wstr(&format!("{:02}:{:02}", settings.shift.night_end[0], settings.shift.night_end[1])).as_ptr(),
+            edit_style | windows_sys::Win32::UI::WindowsAndMessaging::ES_CENTER as u32, ex, cy, ew, lh + 4, hwnd, IDC_EDIT_NIGHT_END as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        cy += lh + 12;
+
+        // ═══ 系统设置 ═══
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("── 后端系统配置 ──").as_ptr(),
+            label_style, lx, cy, 340, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        cy += lh + 4;
+
+        // 刷新间隔标签 + 输入
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("自动同步间隔 (秒, 5~3600):").as_ptr(),
+            label_style, lx, cy, 170, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        ctx_ref.hwnd_refresh = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_CLIENTEDGE, to_wstr("EDIT").as_ptr(),
+            to_wstr(&settings.refresh_interval_secs.to_string()).as_ptr(),
+            edit_style, ex, cy, ew, lh + 4, hwnd, IDC_EDIT_REFRESH as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        cy += lh + 8;
+
+        // 系统开关
+        ctx_ref.hwnd_auto_open = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("BUTTON").as_ptr(),
+            to_wstr("启动时自动打开管理台网页").as_ptr(),
+            btn_checkbox_style, lx, cy, 420, lh + 4, hwnd, IDC_CHECK_AUTO_OPEN as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        if settings.auto_open_browser {
+            windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(ctx_ref.hwnd_auto_open, BM_SETCHECK, BST_CHECKED, 0);
+        }
+        cy += lh + 6;
+
+        ctx_ref.hwnd_auto_login = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("BUTTON").as_ptr(),
+            to_wstr("自动提取 Chrome/Edge 商家凭证").as_ptr(),
+            btn_checkbox_style, lx, cy, 420, lh + 4, hwnd, IDC_CHECK_AUTO_LOGIN as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        if settings.auto_login {
+            windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(ctx_ref.hwnd_auto_login, BM_SETCHECK, BST_CHECKED, 0);
+        }
+        cy += lh + 14;
+
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(), to_wstr("── 本月统计边界 ──").as_ptr(),
+            label_style, lx, cy, 480, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        cy += lh + 4;
+
+        ctx_ref.hwnd_month_cal = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("BUTTON").as_ptr(),
+            to_wstr("本月从 00:00 日历日开始统计").as_ptr(),
+            btn_checkbox_style, lx, cy, 420, lh + 4, hwnd, IDC_CHECK_MONTH_CAL as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        if settings.month_start_cal {
+            windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(ctx_ref.hwnd_month_cal, BM_SETCHECK, BST_CHECKED, 0);
+        }
+        cy += lh + 6;
+
+        ctx_ref.hwnd_month_prev = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("BUTTON").as_ptr(),
+            to_wstr("本月统计不包含当前班次").as_ptr(),
+            btn_checkbox_style, lx, cy, 420, lh + 4, hwnd, IDC_CHECK_MONTH_PREV as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        if settings.month_end_prev {
+            windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(ctx_ref.hwnd_month_prev, BM_SETCHECK, BST_CHECKED, 0);
+        }
+        cy += lh + 18;
+
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("STATIC").as_ptr(),
+            to_wstr("完整列显示、计费规则和 Cookie 粘贴请从托盘打开“设置中心”。").as_ptr(),
+            label_style, lx, cy, 500, lh, hwnd, std::ptr::null_mut(), h_instance, std::ptr::null_mut());
+        cy += lh + 16;
+
+        // ═══ 按钮 ═══
+        let bw = 112i32;
+        let bh = 30i32;
+        let bx_ok = dlg_w - bw * 2 - 44;
+        let bx_cancel = bx_ok + bw + 16;
+
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("BUTTON").as_ptr(), to_wstr("保存").as_ptr(),
+            btn_style, bx_ok, cy, bw, bh, hwnd, IDC_BTN_OK as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+        windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0, to_wstr("BUTTON").as_ptr(), to_wstr("取消").as_ptr(),
+            child_style | windows_sys::Win32::UI::WindowsAndMessaging::BS_PUSHBUTTON as u32, bx_cancel, cy, bw, bh, hwnd, IDC_BTN_CANCEL as usize as *mut std::ffi::c_void, h_instance, std::ptr::null_mut());
+
+        // 显示窗口
+        windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(hwnd, 1);  // SW_SHOWNORMAL
+
+        // 消息循环（独立的模态循环，不影响托盘主循环）
+        let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = mem::zeroed();
+        while !*done_ptr && windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
+            windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+            windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+        }
+
+        let saved = *Box::from_raw(result_ptr);
+        let _ = Box::from_raw(done_ptr);
+        if saved {
+            info!("✅ 设置已保存: refresh={}s, auto_open={}", settings.refresh_interval_secs, settings.auto_open_browser);
+        }
+    }
+
+    pub fn run(_exe_dir: String, _html_dir: String, port: String) {
+        let icon = create_icon();
+        let menu = build_menu();
+        let _tray = match tray_icon::TrayIconBuilder::new()
+            .with_tooltip("美团订单管理 - 双击打开网页")
+            .with_icon(icon)
+            .with_menu(Box::new(menu))
+            .build()
+        {
+            Ok(t) => { info!("系统托盘已创建"); t }
+            Err(e) => { log::error!("托盘创建失败: {}", e); return; }
+        };
+
+        unsafe {
+            let mut msg: win32::MSG = std::mem::zeroed();
+            // GetMessageW 阻塞等待消息，系统休眠挂起，零 CPU 占用，极速唤醒响应
+            while win32::GetMessageW(&mut msg, 0, 0, 0) != 0 {
+                win32::TranslateMessage(&msg);
+                win32::DispatchMessageW(&msg);
+
+                // 消息循环分发后，立刻消费 Rust 跨平台通道中被填充的事件
+                while let Ok(event) = MenuEvent::receiver().try_recv() {
+                    handle_menu(&event, &_exe_dir, &port);
+                }
+                while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: tray_icon::MouseButton::Left,
+                            button_state: tray_icon::MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        open_browser(&port, "");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod tray {
+    pub fn run(_exe_dir: String, _html_dir: String, _port: String) {
+        log::info!("系统托盘: 当前平台不支持");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Main
+// ═══════════════════════════════════════════════════════════════════
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    // 获取工作目录和端口
+    let exe_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8899".into());
+
+    // 初始化日志系统
+    init_logging(&exe_dir);
+
+    let version = env!("CARGO_PKG_VERSION");
+    let build_time = get_build_version();
+
+    // 启动横幅
+    info!("");
+    info!("╔══════════════════════════════════════════════════════════════╗");
+    info!("║  🛒  美团订单管理系统 v{} ({})", version, build_time);
+    info!("╚══════════════════════════════════════════════════════════════╝");
+    info!("");
+
+    let dir = exe_dir.clone();
+
+    // 检查已有实例
+    match check_existing_instance(&port) {
+        Some(false) => {
+            info!("已在运行 → http://localhost:{}", port);
+            info!("");
+            std::process::exit(0);
+        }
+        Some(true) => {
+            info!("旧版本已关闭，启动新版本...");
+        }
+        None => {}
+    }
+
+    println!("  📋 [1/4] 检查登录状态...");
+    let auto_login = load_settings().auto_login && std::env::var("AUTO_LOGIN").map(|v| v != "0" && v != "false").unwrap_or(true);
+    let has_cookies = if auto_login {
+        print!("         └─ 正在从浏览器提取 Cookie...");
+        let ok = std::thread::spawn(ensure_cookies).join().unwrap_or(false);
+        if ok { println!(" ✅"); } else { println!(" ⚠️ 需要登录"); }
+        ok
+    } else {
+        let cpath = cookie_file_path();
+        let ok = std::path::Path::new(&cpath).exists();
+        if ok { println!("         └─ Cookie 已存在 ✅"); }
+        ok
+    };
+    if !has_cookies {
+        println!("         └─ ⚠️  Cookie 缺失。首次使用请确保已登录美团商家后台");
+    }
+
+    println!("");
+    println!("  📋 [2/4] 初始化数据库...");
+    let manager = SqliteConnectionManager::file(format!("{}/meituan_orders.db", exe_dir));
+    let pool = Pool::builder()
+        .max_size(8)
+        .connection_timeout(Duration::from_secs(5))
+        .build(manager)
+        .expect("数据库连接池初始化失败");
+    init_db(&pool).expect("数据库表初始化失败");
+    let conn = pool.get().expect("获取数据库连接失败");
+    let total = db_total(&conn);
+    let refunded = db_refunded(&conn);
+    let (min_date, max_date) = db_daterange(&conn);
+    println!("         └─ 共 {} 条订单 | 已退款 {} 条", total, refunded);
+    println!("         └─ 数据范围: {} ~ {}", min_date.as_deref().unwrap_or("-"), max_date.as_deref().unwrap_or("-"));
+
+    println!("");
+    println!("  📋 [3/4] 检查配置文件...");
+    let cookie_ok = std::path::Path::new(&format!("{}/meituan_cookies.json", exe_dir)).exists();
+    println!("         └─ Cookie 凭证: {}", if cookie_ok { "✅" } else { "⚠️ 缺失" });
+    if std::path::Path::new(&format!("{}/settings.json", exe_dir)).exists() {
+        let s = load_settings();
+        let fee_count = serde_json::from_str::<Vec<serde_json::Value>>(&s.fee_json).unwrap_or_default().len();
+        println!("         └─ 计费规则: ✅ ({} 条套餐)", fee_count);
+    } else {
+        println!("         └─ 计费规则: ⚠️ 使用默认");
+    }
+
+    println!("");
+    println!("  📋 [4/4] 启动服务...");
+
+    let state = web::Data::new(AppState {
+        db: pool.clone(),
+        cookie_file: format!("{}/meituan_cookies.json", exe_dir),
+        html_dir: dir.clone(),
+        exe_dir: exe_dir.clone(),
+    });
+
+		    // 自动更新任务：按 settings.json 中的刷新间隔拉取新数据 (使用 15分钟 短查找窗口快速同步最新核销与撤销状态)
+		    {
+		        let dir2 = exe_dir.clone();
+		        actix_web::rt::spawn(async move {
+		            loop {
+		                let secs = load_settings().refresh_interval_secs.clamp(5, 3600) as u64;
+		                actix_web::rt::time::sleep(Duration::from_secs(secs)).await;
+	                let d = dir2.clone();
+	                let result = tokio::task::spawn_blocking(move || {
+	                    rust_refresh(&d, false)
+	                }).await.unwrap_or_else(|e| {
+	                    RefreshResponse { new: 0, updated: 0, time: "".into(), errors: vec![format!("spawn_blocking: {}", e)] }
+	                });
+                if !result.errors.is_empty() {
+                    println!("  ⚠️  同步出错: {:?}", result.errors);
+                } else if result.new > 0 || result.updated > 0 {
+                    println!("  🔄 同步: +{} 新订单, {} 更新", result.new, result.updated);
+                }
+	            }
+	        });
+	    }
+
+	    // 深度对账同步任务：固定 30 分钟间隔运行 (使用 50小时 深度查找窗口同步 48小时自动退款状态)
+	    {
+	        let dir2 = exe_dir.clone();
+	        actix_web::rt::spawn(async move {
+	            loop {
+	                actix_web::rt::time::sleep(Duration::from_secs(1800)).await;
+	                let d = dir2.clone();
+	                let result = tokio::task::spawn_blocking(move || {
+	                    rust_refresh(&d, true)
+	                }).await.unwrap_or_else(|e| {
+	                    RefreshResponse { new: 0, updated: 0, time: "".into(), errors: vec![format!("spawn_blocking deep: {}", e)] }
+	                });
+                if !result.errors.is_empty() {
+                    println!("  ⚠️  深度同步出错: {:?}", result.errors);
+                } else if result.new > 0 || result.updated > 0 {
+                    println!("  🔄 深度同步: +{} 新订单, {} 更新", result.new, result.updated);
+                }
+	            }
+	        });
+	    }
+
+            println!("         └─ HTTP 服务: ✅ 端口 {}", port);
+            println!("");
+            println!("  ┌──────────────────────────────────────────────────────────────┐");
+            println!("  │  🌐 浏览器打开: http://localhost:{:<28} │", port);
+            println!("  │  📱 局域网访问: http://<本机IP>:{:<28} │", port);
+            println!("  │  ❌ 按 Ctrl+C 退出                                        │");
+            println!("  └──────────────────────────────────────────────────────────────┘");
+            println!("");
+
+			    // 启动系统托盘（独立线程）
+			    {
+			        let tp = port.clone();
+			        std::thread::spawn(move || {
+			        tray::run(exe_dir.clone(), dir.clone(), tp);
+			        });
+				        info!("系统托盘线程已启动");
+			    }
+
+            if load_settings().auto_open_browser {
+                let open_port = port.clone();
+                actix_web::rt::spawn(async move {
+                    actix_web::rt::time::sleep(Duration::from_millis(800)).await;
+                    open_browser_url(&format!("http://localhost:{}", open_port));
+                });
+            }
+
+			    match HttpServer::new(move || {
+	        App::new()
+	            .app_data(state.clone())
+            .route("/", web::get().to(handle_index))
+            .route("/settings", web::get().to(handle_settings_page))
+            .route("/logo.png", web::get().to(handle_logo))
+            .route("/api/health", web::get().to(handle_health))
+	            .route("/api/stats", web::get().to(handle_stats))
+	            .route("/api/stats/detail", web::get().to(handle_stats_detail))
+	            .route("/api/query", web::get().to(handle_query))
+	            .route("/api/refresh", web::get().to(handle_refresh))
+            .route("/api/settings", web::get().to(handle_get_settings))
+            .route("/api/settings", web::put().to(handle_put_settings))
+	    })
+	    .workers(4)
+	    .bind(format!("0.0.0.0:{}", port))
+		    {
+		        Ok(s) => {
+		            s.run().await
+		        }
+	        Err(e) => {
+                println!("");
+                println!("  ❌ 端口 {} 绑定失败: {}", port, e);
+                println!("  💡 更换端口: set PORT=8888 && meituan-rs.exe");
+                println!("");
+	            std::process::exit(1);
+	        }
+	    }
+	}
