@@ -12,8 +12,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::Command;
-use std::sync::{Mutex, TryLockError};
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+use std::time::Instant;
 
 // This will be removed - the frontend now doesn't call query() on init
 // The frontend version is in meituan_query.html
@@ -762,65 +764,77 @@ fn build_daily_breakdown(conn: &rusqlite::Connection, exe_dir: &str, start: &str
 //  数据刷新（调用Python脚本，requests库更稳定）
 // ═══════════════════════════════════════════════════════════════════
 
-static REFRESH_LOCK: Mutex<()> = Mutex::new(());
+static REFRESH_LOCK: AtomicBool = AtomicBool::new(false);
+static REFRESH_LOCK_TIME: Mutex<Option<Instant>> = Mutex::new(None);
+const SYNC_TIMEOUT: Duration = Duration::from_secs(300); // 5分钟超时自动释放
+
+fn try_acquire_sync_lock() -> bool {
+    // 检查是否已被占用
+    if REFRESH_LOCK.load(std::sync::atomic::Ordering::Relaxed) {
+        // 检查是否超时
+        if let Ok(guard) = REFRESH_LOCK_TIME.lock() {
+            if let Some(start) = *guard {
+                if start.elapsed() > SYNC_TIMEOUT {
+                    // 超时，强制释放
+                    REFRESH_LOCK.store(false, std::sync::atomic::Ordering::Relaxed);
+                    info!("同步锁超时 {} 秒，强制释放", SYNC_TIMEOUT.as_secs());
+                }
+            }
+        } else {
+            return false;
+        }
+    }
+    // 尝试获取锁
+    if REFRESH_LOCK.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::Relaxed).is_ok() {
+        if let Ok(mut guard) = REFRESH_LOCK_TIME.lock() {
+            *guard = Some(Instant::now());
+        }
+        true
+    } else {
+        false
+    }
+}
+
+fn release_sync_lock() {
+    REFRESH_LOCK.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut guard) = REFRESH_LOCK_TIME.lock() {
+        *guard = None;
+    }
+}
 
 fn rust_refresh(exe_dir: &str, deep: bool) -> RefreshResponse {
-    let _refresh_guard = match REFRESH_LOCK.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::WouldBlock) => {
-            return RefreshResponse {
-                new: 0,
-                updated: 0,
-                time: Local::now().format("%H:%M:%S").to_string(),
-                errors: vec!["已有同步任务正在运行，请稍后再试".into()],
-            };
+    if !try_acquire_sync_lock() {
+        return RefreshResponse {
+            new: 0,
+            updated: 0,
+            time: Local::now().format("%H:%M:%S").to_string(),
+            errors: vec!["已有同步任务正在运行，请稍后再试".into()],
+        };
+    }
+    struct SyncGuard;
+    impl Drop for SyncGuard {
+        fn drop(&mut self) {
+            release_sync_lock();
         }
-        Err(TryLockError::Poisoned(_)) => {
-            return RefreshResponse {
-                new: 0,
-                updated: 0,
-                time: Local::now().format("%H:%M:%S").to_string(),
-                errors: vec!["同步锁异常，请重启程序".into()],
-            };
-        }
-    };
+    }
+    let _guard = SyncGuard;
+    let sync_start = Instant::now();
+    println!("  🔄 同步开始 ({})...", if deep { "深度" } else { "快速" });
     let now = Local::now().format("%H:%M:%S").to_string();
     let cookie_file = format!("{}/meituan_cookies.json", exe_dir);
     let db_path = format!("{}/meituan_orders.db", exe_dir);
+    let py_script = format!("{}/meituan_sync.py", exe_dir);
 
-    // 1. 读取 Cookie
-    let cookie_str = match std::fs::read_to_string(&cookie_file) {
-        Ok(content) => {
-            match serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                Ok(arr) => {
-                    arr.iter()
-                        .filter_map(|c| {
-                            let name = c.get("name")?.as_str()?;
-                            let value = c.get("value")?.as_str()?;
-                            Some(format!("{}={}", name, value))
-                        }).collect::<Vec<_>>().join("; ")
-                }
-                Err(_) => String::new(),
-            }
-        }
-        Err(e) => return RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("Cookie read: {}", e)] },
-    };
-
-    if cookie_str.is_empty() {
-        return RefreshResponse { new: 0, updated: 0, time: now, errors: vec!["No cookies".into()] };
-    }
-
-    // 2. 打开数据库
+    // 获取最新时间
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => return RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("DB: {}", e)] },
     };
-
-    // 3. 获取最新时间
     let latest: String = conn.query_row(
         "SELECT COALESCE(MAX(consume_date),'2026-01-01 00:00:00') FROM orders", [],
         |r| r.get(0),
     ).unwrap_or_else(|_| "2026-01-01 00:00:00".into());
+    let _ = conn.close();
 
     let mut start_ts = chrono::NaiveDateTime::parse_from_str(&latest, "%Y-%m-%d %H:%M:%S")
         .map(|dt| {
@@ -831,202 +845,67 @@ fn rust_refresh(exe_dir: &str, deep: bool) -> RefreshResponse {
                 .unwrap_or(0)
         }).unwrap_or(0);
 
-    // 💡 苹果风双轨智能查找窗口设计：
-    // - deep = false (高频短轮询，默认): 前推 15 分钟，快速检验 10 分钟内可能发生的“撤销核销”（失踪）订单
-    // - deep = true (深度对账轮询): 前推 50 小时，全面覆盖 48 小时自动退款时效
-    let lookback_ms = if deep {
-        50 * 3600 * 1000 // 50 小时
+    let lookback_ms = if deep { 50 * 3600 * 1000 } else { 15 * 60 * 1000 };
+    let end_ts = chrono::Utc::now().timestamp_millis();
+    // 限制同步窗口不超过 lookback_ms
+    let min_start_ts = end_ts - lookback_ms;
+    if start_ts < min_start_ts {
+        start_ts = min_start_ts;
     } else {
-        15 * 60 * 1000 // 15 分钟
+        // 已有订单时，往前推 1 小时（避免漏掉边界订单）
+        start_ts = start_ts.saturating_sub(3600 * 1000);
+    }
+    let api_url = "https://e.dianping.com/couponrecord/queryCouponRecordDetails?yodaReady=h5&csecplatform=4&csecversion=4.2.4";
+
+    // 调用 Python 脚本执行同步
+    let output = match std::process::Command::new("python3")
+        .arg(&py_script)
+        .arg(&cookie_file)
+        .arg(&db_path)
+        .arg(api_url)
+        .arg(start_ts.to_string())
+        .arg(end_ts.to_string())
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("执行同步脚本失败: {}", e)] };
+        }
     };
 
-    if start_ts > lookback_ms {
-        start_ts -= lookback_ms;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        return RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("同步脚本出错: {}", stderr)] };
     }
-    let end_ts = chrono::Utc::now().timestamp_millis();
 
-    // 4. 调用美团 API 并滑动拉取
-    let api_url = "https://e.dianping.com/couponrecord/queryCouponRecordDetails?yodaReady=h5&csecplatform=4&csecversion=4.2.4";
-    let mut all_records: Vec<serde_json::Value> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-
-    const MAX_SLICE_MS: i64 = 3 * 24 * 3600 * 1000; // 3天滑动切片
-    let mut current_start = start_ts;
-
-    while current_start < end_ts {
-        let current_end = std::cmp::min(current_start + MAX_SLICE_MS, end_ts);
-
-        for page in 0..50 {
-            let payload = serde_json::json!({
-                "dealGroupIds":"","bussinessType":0,"shopIds":"0","productTabNum":1,
-                "offset": page*100, "limit":100,
-                "beginDate": current_start, "endDate": current_end,
-                "subTabNum":null, "isConsumeMedical":false
-            });
-            let config = ureq::config::Config::builder()
-                .timeout_global(Some(std::time::Duration::from_secs(10)))
-                .build();
-            let agent = ureq::Agent::new_with_config(config);
-            match agent.post(api_url)
-                .header("User-Agent", "Mozilla/5.0")
-                .header("Content-Type", "application/json")
-                .header("Origin", "https://e.dianping.com")
-                .header("Referer", "https://e.dianping.com/app/np-mer-voucher-web-static/records")
-                .header("Cookie", &cookie_str)
-                .send_json(&payload)
-            {
-                Ok(mut resp) => {
-                    let data: serde_json::Value = match resp.body_mut().read_json() {
-                        Ok(d) => d,
-                        Err(e) => { errors.push(format!("JSON: {}", e)); break; }
-                    };
-                    let d = data.get("data").and_then(|v| v.as_object()).cloned();
-                    if let Some(d) = d {
-                        if page == 0 && d.get("recordSum").and_then(|v| v.as_i64()).unwrap_or(0) == 0 { break; }
-                        if let Some(recs) = d.get("couponRecordDetails").and_then(|v| v.as_array()) {
-                            if recs.is_empty() { break; }
-                            all_records.extend(recs.to_vec());
-                            let total: i64 = d.get("recordSum").and_then(|v| v.as_i64()).unwrap_or(0);
-                            if (page + 1) * 100 >= total { break; }
-                        } else { break; }
-                    } else { break; }
-                }
-                Err(e) => {
-                    // 检测 Cookie 过期（401/403）并给出明确提示
-                    let msg = format!("{:?}", e);
-                    if msg.contains("401") || msg.contains("403") || msg.contains("未登录") {
-                        errors.push("Cookie 已过期，请在浏览器重新登录美团商家后台后刷新 meituan_cookies.json".into());
-                    } else {
-                        errors.push(format!("HTTP page {}: {}", page, e));
-                    }
-                    break;
-                }
+    // 解析 JSON 结果
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(result) => {
+            if let Some(error) = result.get("error") {
+                return RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("同步失败: {}", error)] };
             }
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        }
+            let new_count = result.get("new").and_then(|v| v.as_i64()).unwrap_or(0);
+            let updated = result.get("updated").and_then(|v| v.as_i64()).unwrap_or(0);
+            let errors: Vec<String> = result.get("errors")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
 
-        if !errors.is_empty() {
-            break;
-        }
-        current_start = current_end;
-    }
-
-    if !errors.is_empty() {
-        return RefreshResponse { new: 0, updated: 0, time: now, errors };
-    }
-
-    // 5. 写入数据库（INSERT OR REPLACE = upsert，避免 exists-check 竞态）
-    let mut new_count = 0i64;
-    let mut updated_count = 0i64;
-    if !all_records.is_empty() {
-        for rec in &all_records {
-            let coupon = rec.get("couponValue").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if coupon.is_empty() { continue; }
-            let desc = rec.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let ir = if desc.contains("退款") || desc.contains("退费") || desc.contains("已退") || desc.contains("撤销") || desc.contains("撤单") { 1 } else { 0 };
-            let new_pi = rec.get("productInfo").and_then(|v| v.as_str()).unwrap_or("");
-            let new_pt = rec.get("productTypeName").and_then(|v| v.as_str()).unwrap_or("");
-            let new_sp = rec.get("salePrice").and_then(|v| v.as_str()).unwrap_or("");
-            let new_dp = rec.get("discountPrice").and_then(|v| v.as_str()).unwrap_or("");
-            let new_cd = rec.get("consumeDate").and_then(|v| v.as_str()).unwrap_or("");
-            let new_mb = rec.get("mobile").and_then(|v| v.as_str()).unwrap_or("");
-            let new_si = rec.get("consumeShopInfo").and_then(|v| v.as_str()).unwrap_or("");
-
-            // 检查记录是否已存在，以及是否有字段实际变化
-            let existing = conn.query_row(
-                "SELECT product_info,product_type,sale_price,discount_price,consume_date,mobile,description,shop_info,is_refunded FROM orders WHERE coupon_value = ?",
-                [&coupon],
-                |r| Ok((
-                    r.get::<_, String>(0).unwrap_or_default(),
-                    r.get::<_, String>(1).unwrap_or_default(),
-                    r.get::<_, String>(2).unwrap_or_default(),
-                    r.get::<_, String>(3).unwrap_or_default(),
-                    r.get::<_, String>(4).unwrap_or_default(),
-                    r.get::<_, String>(5).unwrap_or_default(),
-                    r.get::<_, String>(6).unwrap_or_default(),
-                    r.get::<_, String>(7).unwrap_or_default(),
-                    r.get::<_, i64>(8).unwrap_or_default(),
-                ))
-            ).ok();
-
-            let changed = match &existing {
-                None => true, // 新记录
-                Some((pi, pt, sp, dp, cd, mb, de, si, old_ir)) => {
-                    // 只有当至少一个字段实际变化时才计为"更新"
-                    pi != new_pi || pt != new_pt || sp != new_sp || dp != new_dp ||
-                    cd != new_cd || mb != new_mb || de != desc || si != new_si || *old_ir != ir as i64
-                }
-            };
-
-            // 原子 upsert
-            conn.execute(
-                "INSERT INTO orders (coupon_value,product_info,product_type,sale_price,\
-                 discount_price,consume_date,mobile,description,shop_info,is_refunded,updated_at) \
-                 VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) \
-                 ON CONFLICT(coupon_value) DO UPDATE SET \
-                 product_info=excluded.product_info,product_type=excluded.product_type,\
-                 sale_price=excluded.sale_price,discount_price=excluded.discount_price,\
-                 consume_date=excluded.consume_date,mobile=excluded.mobile,\
-                 description=excluded.description,shop_info=excluded.shop_info,\
-                 is_refunded=excluded.is_refunded,updated_at=CURRENT_TIMESTAMP",
-                rusqlite::params![&coupon, new_pi, new_pt, new_sp, new_dp, new_cd, new_mb, desc, new_si, ir]
-            ).unwrap_or(0);
-
-            if existing.is_none() { new_count += 1; }
-            else if changed { updated_count += 1; }
-            // 如果存在且无变化，不计入任何统计
-        }
-    }
-
-    // 6. 自动检测历史“撤销核销”（美团在撤销核销后，会直接从已核销列表中物理删除此订单，导致增量接口不再返回它）
-    // 比对本地最近 24 小时内的正常订单与本次拉回的记录集，找出缺失项并置为已撤销
-    use chrono::TimeZone;
-    let start_dt = chrono::FixedOffset::east_opt(8 * 3600)
-        .unwrap()
-        .timestamp_opt(start_ts / 1000, 0)
-        .unwrap();
-    let start_date_str = start_dt.format("%Y-%m-%d %H:%M:%S").to_string();
-
-    let mut local_active_orders: Vec<(String, String)> = Vec::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT coupon_value, consume_date FROM orders WHERE consume_date >= ? AND is_refunded = 0") {
-        let rows = stmt.query_map(rusqlite::params![&start_date_str], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        }).ok().map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>()).unwrap_or_default();
-        local_active_orders = rows;
-    }
-
-    let mut api_coupon_set = std::collections::HashSet::new();
-    for rec in &all_records {
-        if let Some(coupon) = rec.get("couponValue").and_then(|v| v.as_str()) {
-            api_coupon_set.insert(coupon.to_string());
-        }
-    }
-
-    let mut revoked_count = 0i64;
-    let now_ts = chrono::Utc::now().timestamp_millis();
-    for (coupon, consume_date) in local_active_orders {
-        if !api_coupon_set.contains(&coupon) {
-            // 解析本地消费日期
-            let order_ts = chrono::NaiveDateTime::parse_from_str(&consume_date, "%Y-%m-%d %H:%M:%S")
-                .map(|dt| {
-                    use chrono::TimeZone;
-                    chrono::FixedOffset::east_opt(8 * 3600)
-                        .and_then(|offset| offset.from_local_datetime(&dt).earliest())
-                        .map(|t| t.timestamp_millis())
-                        .unwrap_or(0)
-                }).unwrap_or(0);
-            // 排除 2 分钟以内新核销的临时分页延迟订单，确保判定准确
-            if now_ts - order_ts > 120_000 {
-                let _ = conn.execute(
-                    "UPDATE orders SET is_refunded = 1, description = '[已撤销]', updated_at = CURRENT_TIMESTAMP WHERE coupon_value = ?",
-                    rusqlite::params![&coupon]
-                );
-                revoked_count += 1;
+            let elapsed = sync_start.elapsed().as_secs();
+            if errors.is_empty() {
+                println!("  ✅ 同步完成，耗时 {} 秒 (新增 {}, 更新 {})", elapsed, new_count, updated);
+            } else {
+                println!("  ❌ 同步出错，耗时 {} 秒: {:?}", elapsed, errors);
             }
+
+            RefreshResponse { new: new_count, updated, time: now, errors }
+        }
+        Err(e) => {
+            RefreshResponse { new: 0, updated: 0, time: now, errors: vec![format!("解析同步结果失败: {} | {}", e, stdout)] }
         }
     }
-
-    RefreshResponse { new: new_count, updated: updated_count + revoked_count, time: now, errors }
 }
 
 async fn handle_refresh(
@@ -1135,47 +1014,52 @@ fn validate_cookies() -> serde_json::Value {
         "subTabNum": null, "isConsumeMedical": false
     });
 
-    let config = ureq::config::Config::builder()
-        .timeout_global(Some(std::time::Duration::from_secs(10)))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-
-    match agent.post(api_url)
-        .header("User-Agent", "Mozilla/5.0")
-        .header("Content-Type", "application/json")
-        .header("Origin", "https://e.dianping.com")
-        .header("Referer", "https://e.dianping.com/app/np-mer-voucher-web-static/records")
-        .header("Cookie", &cookie_str)
-        .send_json(&payload)
+    let payload_str = payload.to_string();
+    let py_script = format!("{}/http_helper.py", std::env::current_dir().unwrap_or_default().to_string_lossy());
+    let tmp_path = format!("{}/validate_tmp.json", std::env::current_dir().unwrap_or_default().to_string_lossy());
+    let output = match std::process::Command::new("python3")
+        .arg(&py_script)
+        .arg(api_url)
+        .arg(&cookie_str)
+        .arg(&payload_str)
+        .arg(&tmp_path)
+        .output()
     {
-        Ok(mut resp) => {
-            let data: serde_json::Value = match resp.body_mut().read_json() {
-                Ok(d) => d,
-                Err(e) => return serde_json::json!({"valid": false, "message": format!("API 响应解析失败: {}", e)}),
-            };
+        Ok(o) => o,
+        Err(e) => return serde_json::json!({"valid": false, "message": format!("HTTP 请求失败: {}", e)}),
+    };
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("401") || stderr.contains("403") {
+            return serde_json::json!({"valid": false, "message": "Cookie 已过期（HTTP 401/403），请在浏览器重新登录美团商家后台后重新提取"});
+        }
+        return serde_json::json!({"valid": false, "message": format!("HTTP 请求失败: {}", stderr.chars().take(100).collect::<String>())});
+    }
+    
+    let body_str = match std::fs::read_to_string(&tmp_path) {
+        Ok(s) => s,
+        Err(e) => return serde_json::json!({"valid": false, "message": format!("读取响应失败: {}", e)}),
+    };
+    let _ = std::fs::remove_file(&tmp_path);
+    
+    let data: serde_json::Value = match serde_json::from_str(&body_str) {
+        Ok(d) => d,
+        Err(e) => return serde_json::json!({"valid": false, "message": format!("API 响应解析失败: {}", e)}),
+    };
 
-            // 检查是否有 data 字段
-            if let Some(d) = data.get("data").and_then(|v| v.as_object()) {
-                let record_sum = d.get("recordSum").and_then(|v| v.as_i64()).unwrap_or(0);
-                serde_json::json!({
-                    "valid": true,
-                    "message": format!("Cookie 有效！最近 1 天共有 {} 条核销记录", record_sum),
-                    "recordSum": record_sum
-                })
-            } else if let Some(msg) = data.get("msg").and_then(|v| v.as_str()) {
-                serde_json::json!({"valid": false, "message": format!("美团返回: {}", msg)})
-            } else {
-                serde_json::json!({"valid": false, "message": "API 响应格式异常，Cookie 可能已过期"})
-            }
-        }
-        Err(e) => {
-            let msg = format!("{:?}", e);
-            if msg.contains("401") || msg.contains("403") {
-                serde_json::json!({"valid": false, "message": format!("Cookie 已过期（HTTP {}），请在浏览器重新登录美团商家后台后重新提取", msg)})
-            } else {
-                serde_json::json!({"valid": false, "message": format!("API 请求失败: {}", e)})
-            }
-        }
+    // 检查是否有 data 字段
+    if let Some(d) = data.get("data").and_then(|v| v.as_object()) {
+        let record_sum = d.get("recordSum").and_then(|v| v.as_i64()).unwrap_or(0);
+        serde_json::json!({
+            "valid": true,
+            "message": format!("Cookie 有效！最近 1 天共有 {} 条核销记录", record_sum),
+            "recordSum": record_sum
+        })
+    } else if let Some(msg) = data.get("msg").and_then(|v| v.as_str()) {
+        serde_json::json!({"valid": false, "message": format!("美团返回: {}", msg)})
+    } else {
+        serde_json::json!({"valid": false, "message": "API 响应格式异常，Cookie 可能已过期"})
     }
 }
 

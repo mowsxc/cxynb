@@ -1859,6 +1859,11 @@ async function autoSync(){
     const r=await fetchWithRetry(API+'/api/refresh?deep=false');
     const d=await r.json();
     if(d.errors && d.errors.length){
+      // 已有同步任务在运行时静默忽略，不显示错误
+      if(d.errors.some(function(e){ return e.indexOf('已有同步任务') >= 0; })){
+        document.getElementById('dot').className='bar-sep on';
+        return;
+      }
       throw new Error(d.errors.join('；'));
     }
     document.getElementById('dot').className='bar-sep on';
@@ -1892,7 +1897,7 @@ async function autoSync(){
 
 function startAuto(){
   if(autoTimer) clearInterval(autoTimer);
-  autoSync();
+  // 注意：不再在启动时调用autoSync()，避免与服务端启动同步冲突导致锁死
   autoTimer = setInterval(() => {
     if(document.getElementById('autoRefresh').checked) {
       autoSync();
