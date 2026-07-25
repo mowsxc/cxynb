@@ -1,0 +1,18 @@
+[Unit]
+Description=cxynb 美团订单服务 (meituan-rs)
+After=network.target
+
+[Service]
+Type=simple
+User=mo
+WorkingDirectory=/opt/cxynb
+ExecStart=/opt/cxynb/meituan-rs
+Environment=PORT=8899
+Environment=RUST_LOG=info
+# 主密码通过受保护文件注入（首次启动会自动写入 password.meta.json）
+EnvironmentFile=/opt/cxynb/.master_pwd
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

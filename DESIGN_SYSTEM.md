@@ -1,8 +1,8 @@
-# 美团订单管理系统 - 设计系统规范 v1.0
+# 美团订单管理系统 - 设计系统规范 v1.1
 
 **项目**: meituan-rs  
 **版本**: 0.5.1  
-**更新**: 2026-07-05  
+**更新**: 2026-07-25  
 **状态**: 唯一权威参考
 
 ---
@@ -441,6 +441,50 @@ tbody tr.cola:hover td {
 |------|------|
 | > 768px | 完整功能 |
 | ≤ 768px | 隐藏非关键列、紧凑间距、横向滚动 |
+
+---
+
+## 12. 暗色主题（v1.1 新增）
+
+主题通过 `document.documentElement` 上的 `data-theme` 属性切换；所有颜色均已变量化，组件不写死亮色字面量（暗色覆盖块统一在 `[data-theme="dark"]` 下重定义语义色与主要表面）。
+
+| 项 | 说明 |
+|----|------|
+| 切换入口 | 顶栏 `#themeToggle` 按钮（月/日图标，点击调用 `toggleTheme()`） |
+| 持久化 | `localStorage['theme']` = `dark` \| `light` |
+| 系统偏好 | 首次访问读取 `prefers-color-scheme: dark`；`<head>` 内联脚本在 `<body>` 渲染前同步应用，避免亮暗白闪 |
+| 防闪烁 | 主体 CSS 之前的内联脚本已设置 `data-theme`，CSS 无需等待 JS |
+
+**使用约定**
+- 新增组件颜色一律使用语义变量（`--card` / `--border` / `--text-muted` 等），禁止写死 `#fff`、`#f9fafb` 等亮色字面量，否则暗色下会出现“亮斑”。
+- 确需保留固定色（如品牌橙 `--primary`）时保持不变，暗色下自动适配。
+- 主题相关图标用 `.theme-rot` 包裹，切换时带旋转微动效。
+
+## 13. 微动画工具类（v1.1 新增）
+
+| 工具类 / 函数 | 触发点 | 效果 |
+|------|------|------|
+| `tbody tr.row-in` + 行内 `animation-delay` | 查询返回数据后由 `renderTable()` 注入（仅整表刷新时，排序/加载更多不重放） | 表格行逐行浮现（stagger ≤ 24 行 × 16ms） |
+| `.modal-box:not(.settings-dialog)` | 详情弹窗打开 | scale + 淡入（`.settings-dialog` 已有专属 `modal-pop`，排除避免双动画） |
+| `.ripple` | 按钮/标签/图标按钮 `pointerdown`（`attachRipple()` 委托） | 点击涟漪触觉反馈 |
+| `.skeleton` / `.sk-row` | 查询loading态（`skeletonRows(n)`） | 骨架屏微光（shimmer） |
+| `.toast::after` | 全局 Toast | 底部 3s 进度条，hover 暂停 |
+| `runCountUp()` + `.stat-num[data-count]` | 结果栏统计（单/可乐/退款/计费/财务） | 数字 easeOutCubic 递增 |
+| `.empty-state` | 空数据/查询失败（`emptyState(title,sub)`） | 居中插画 + 标题/副标题 |
+
+**规则**：所有动画时长 ≤ 300ms（见第 10 节）；行入场、弹窗、涟漪、骨架屏、Toast 进度条均已受 `prefers-reduced-motion` 守卫。
+
+## 14. 可访问性（减弱动画）
+
+```css
+@media (prefers-reduced-motion: reduce){
+  tbody tr.row-in, .modal-box:not(.settings-dialog), .ripple,
+  .skeleton, .toast, .toast::after, .theme-rot { animation: none !important; transition: none !important; }
+}
+```
+
+- `runCountUp()` 在 `prefers-reduced-motion` 下直接渲染终值，不做递增。
+- 切换主题、骨架屏、Toast 进度条等同样尊重该偏好。
 
 ---
 

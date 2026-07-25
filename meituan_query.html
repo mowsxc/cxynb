@@ -5,6 +5,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>美团订单管理</title>
 <link rel="icon" type="image/png" href="/logo.png">
+<script>
+/* 全局前缀：根据部署子路径（/mtdd 美团订单, /syt 收银台）自动计算 API 基址；主题防闪烁 */
+(function(){
+  var p = location.pathname || '/';
+  var base = '';
+  if (p.indexOf('/mtdd') === 0) base = '/mtdd';
+  else if (p.indexOf('/syt') === 0) base = '/syt';
+  window.API = base;
+  try {
+    var f = document.querySelector('link[rel~="icon"]');
+    if (f) f.href = base + '/logo.png';
+  } catch(e){}
+  document.addEventListener('DOMContentLoaded', function(){
+    var lg = document.getElementById('appLogo');
+    if (lg) lg.src = base + '/logo.png';
+  });
+  try {
+    var t = localStorage.getItem('theme');
+    if (!t) t = (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch(e){}
+})();
+</script>
 <style>
 :root{
   /* 字体 */
@@ -711,6 +734,156 @@ tr.refunded:hover td:first-child {
 .login-note{margin-top:14px;font-size:11px;color:var(--text-subtle)}
 
 @media(max-width:768px){.bar{flex-direction:column;align-items:flex-start}.filters{gap:4px}.filters input[type=date]{width:auto}.filters input[type=time]{width:auto}.filters input[type=text]{min-width:50px;width:auto}}
+
+/* ════════════════════════════════════════════════════════════
+   新增：微动画 · 暗色主题 · 骨架屏 · 滚动条（设计系统 v1.1）
+   ════════════════════════════════════════════════════════════ */
+
+/* ── 自定义滚动条 ── */
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:rgba(0,0,0,.16);border-radius:999px;border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.3);background-clip:content-box}
+[data-theme="dark"] *::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);background-clip:content-box}
+[data-theme="dark"] *::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.3);background-clip:content-box}
+
+/* ── 涟漪反馈（点击触觉反馈）── */
+.btn,.tag,.nav-icon-btn,#refreshBtn{position:relative;overflow:hidden}
+.btn>*,.tag>*,.nav-icon-btn>*,#refreshBtn>*{position:relative;z-index:1}
+.ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,.5);transform:translate(-50%,-50%) scale(0);pointer-events:none;animation:ripple .6s ease-out forwards;z-index:0}
+[data-theme="dark"] .ripple{background:rgba(255,255,255,.16)}
+@keyframes ripple{to{transform:translate(-50%,-50%) scale(1);opacity:0}}
+
+/* ── 表格行入场（查询后逐行浮现）── */
+@keyframes rowIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
+tbody tr.row-in{animation:rowIn .4s cubic-bezier(.2,.8,.2,1) both}
+
+/* ── 详情弹窗入场 ── */
+@keyframes modalBoxIn{from{opacity:0;transform:translate(-50%,-50%) scale(.96)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+.modal-box:not(.settings-dialog){animation:modalBoxIn .22s cubic-bezier(.2,.8,.2,1) both}
+
+/* ── 骨架屏（查询加载中）── */
+@keyframes shimmer{0%{background-position:-468px 0}100%{background-position:468px 0}}
+.skeleton{display:inline-block;height:12px;border-radius:6px;background:linear-gradient(90deg,#eef0f3 25%,#e2e5ea 37%,#eef0f3 63%);background-size:936px 100%;animation:shimmer 1.3s infinite linear}
+[data-theme="dark"] .skeleton{background:linear-gradient(90deg,#23272f 25%,#2c313b 37%,#23272f 63%);background-size:936px 100%}
+.sk-row td{border-bottom:1px solid #f3f4f6!important;padding:14px 10px!important}
+[data-theme="dark"] .sk-row td{border-bottom-color:#1c2026!important}
+.sk-row .skeleton{width:70%}
+
+/* ── 数字递增 ── */
+.stat-num{font-variant-numeric:tabular-nums}
+
+/* ── 空状态插画 ── */
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:46px 16px;color:var(--text-muted)}
+.empty-state svg{opacity:.6}
+.empty-state .es-title{font-size:14px;font-weight:600;color:var(--text)}
+.empty-state .es-sub{font-size:12px;color:var(--text-subtle)}
+
+/* ── Toast 进度条 ── */
+.toast{position:relative;overflow:hidden}
+.toast::after{content:'';position:absolute;left:0;bottom:0;height:3px;width:100%;background:rgba(255,255,255,.45);transform-origin:left;animation:toast-progress 3s linear forwards}
+.toast:hover::after{animation-play-state:paused}
+@keyframes toast-progress{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+
+/* ── 主题切换按钮 ── */
+#themeToggle{cursor:pointer}
+.theme-rot{transition:transform .5s cubic-bezier(.34,1.56,.64,1)}
+#themeToggle:active .theme-rot{transform:rotate(35deg) scale(.85)}
+
+/* ── 顶部背景质感（不影响可读性）── */
+body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1200px 600px at 82% -12%, rgba(255,102,0,.05), transparent 60%)}
+[data-theme="dark"] body::before{background:radial-gradient(1200px 600px at 82% -12%, rgba(255,102,0,.09), transparent 60%)}
+
+/* ── 减弱动画偏好 ── */
+@media (prefers-reduced-motion: reduce){
+  tbody tr.row-in,.modal-box:not(.settings-dialog),.ripple,.skeleton,.toast,.toast::after,.theme-rot{animation:none!important;transition:none!important}
+}
+
+/* ════════════════════════════════════════════════════════════
+   暗色主题（[data-theme="dark"]）
+   ════════════════════════════════════════════════════════════ */
+[data-theme="dark"]{
+  --text:#e6e8ec;--text-muted:#9aa3b2;--text-subtle:#6b7280;
+  --bg:#0e1014;--card:#171a21;--hover:#1f232c;
+  --border:#272c36;--border-strong:#38404d;
+  --primary-light:#2a1c0e;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  --shadow-md:0 4px 10px rgba(0,0,0,.5);
+  --shadow-lg:0 16px 40px rgba(0,0,0,.55);
+}
+[data-theme="dark"] body{background:var(--bg);color:var(--text)}
+[data-theme="dark"] .bar{background:rgba(23,26,33,.82);border-color:var(--border);box-shadow:0 1px 3px rgba(0,0,0,.4)}
+[data-theme="dark"] .bar .title{color:var(--text)}
+[data-theme="dark"] .bar .meta{color:var(--text-muted)}
+[data-theme="dark"] .bar .tag-badge{background:#2a1c0e;border-color:#3a2814;color:#ffb37a}
+[data-theme="dark"] .db-capsule{background:#1c2029;border-color:var(--border);color:#c2c9d6}
+[data-theme="dark"] #refreshBtn{background:#1c2029;border-color:var(--border);color:#9aa3b2}
+[data-theme="dark"] .nav-icon-btn{background:#1c2029;border-color:var(--border);color:#c2c9d6}
+[data-theme="dark"] .nav-icon-btn:hover{background:var(--primary-light);border-color:#3a2814;color:#ffb37a}
+[data-theme="dark"] .panel{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .filters input,.filters select{background:var(--card);border-color:var(--border);color:var(--text)}
+[data-theme="dark"] .filters input:focus,.filters select:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(255,102,0,.18)}
+[data-theme="dark"] .btn-gray{background:#1c2029;color:var(--text);border-color:var(--border)}
+[data-theme="dark"] .btn-gray:hover{background:#23272f}
+[data-theme="dark"] .tag{background:transparent;border-color:var(--border);color:var(--text-muted)}
+[data-theme="dark"] .tag:hover{border-color:#ffb37a;color:#ffb37a}
+[data-theme="dark"] .result-bar{color:var(--text-muted)}
+[data-theme="dark"] table{background:var(--card)}
+[data-theme="dark"] thead th{background:#14171d;color:var(--text-muted);border-bottom-color:var(--border)}
+[data-theme="dark"] td{border-bottom-color:#1c2026;color:var(--text)}
+[data-theme="dark"] td.phone{color:#c2c9d6}
+[data-theme="dark"] tbody tr:hover td{background:#221a10}
+[data-theme="dark"] tbody tr.refunded td{background:#2a1717;color:#f0a3a3}
+[data-theme="dark"] tbody tr.refunded:hover td{background:#331b1b}
+[data-theme="dark"] tbody tr.cola td{background:#251822}
+[data-theme="dark"] tbody tr.cola:hover td{background:#2e1d28}
+[data-theme="dark"] .dash-sum .si{background:#1c2029;border-color:var(--border)}
+[data-theme="dark"] .fee-table td{background:var(--card)}
+[data-theme="dark"] .fee-table th{background:var(--card);color:var(--text-muted);border-bottom-color:var(--border)}
+[data-theme="dark"] .fee-table tr:hover td{background:#1f232c!important}
+[data-theme="dark"] .fee-table input{color:var(--text)}
+[data-theme="dark"] .fee-table input:focus{background:var(--card)!important}
+[data-theme="dark"] .fee-card{border-color:var(--border)}
+[data-theme="dark"] .dash-table th{background:#14171d;color:var(--text-muted);border-bottom-color:var(--border)}
+[data-theme="dark"] .dash-table td{border-bottom-color:#1c2026}
+[data-theme="dark"] .dash-table tbody tr:hover td{background:#1c1a16!important}
+[data-theme="dark"] .stat-badge-time{background:#1c2029;border-color:var(--border);color:#9aa3b2}
+[data-theme="dark"] .stat-badge-total{background:#15233f;border-color:#22344f;color:#8ab4ff}
+[data-theme="dark"] .stat-badge-cola{background:#2a1414;border-color:#3a1f1f;color:#ff8a8a}
+[data-theme="dark"] .stat-badge-refund{background:#2a1414;border-color:#3a1f1f;color:#ff9a9a}
+[data-theme="dark"] .stat-badge-fee{background:var(--primary-light);border-color:#3a2814;color:#ffb37a}
+[data-theme="dark"] .stat-badge-fin{background:var(--primary-light);border-color:#3a2814;color:#ffb37a}
+[data-theme="dark"] .monthly-trend-container .trend-bar-wrapper{background:#1c2029}
+[data-theme="dark"] .trend-lbl{color:var(--text-muted)}
+[data-theme="dark"] .switch-wrapper{background:#1c2029;border-color:#23272f;color:var(--text)}
+[data-theme="dark"] .switch-wrapper:hover{background:#23272f;border-color:#3a2814}
+[data-theme="dark"] .settings-head{background:linear-gradient(135deg,#1b140c 0%,#171a21 55%,#121620 100%);border-bottom-color:var(--border)}
+[data-theme="dark"] .set-layout{background:#12151b}
+[data-theme="dark"] .set-card{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .settings-footer{background:var(--card);border-top-color:var(--border)}
+[data-theme="dark"] .settings-device{background:#1c2029;border-color:#3a2814;color:#ffb37a}
+[data-theme="dark"] .ios-switch{background:#38404d}
+[data-theme="dark"] .ios-switch::before{background:#cfd3db}
+[data-theme="dark"] .settings-time-row input,.settings-cookie{background:var(--card);border-color:var(--border);color:var(--text)}
+[data-theme="dark"] .settings-time-row input:focus,.settings-cookie:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(255,102,0,.18)}
+[data-theme="dark"] .column-row{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .column-row:hover{background:#1f232c;border-color:#3a2814}
+[data-theme="dark"] .radio-group{background:#1c2029}
+[data-theme="dark"] .radio-group label:has(input:checked){background:#23272f;color:#ffb37a}
+[data-theme="dark"] .login-dialog-single{background:var(--card)}
+[data-theme="dark"] .login-file-btn{background:#1c140c;border-color:var(--border);color:#ffb37a}
+[data-theme="dark"] .login-file-btn:hover{background:var(--primary-light);border-color:#3a2814}
+[data-theme="dark"] .login-divider{color:var(--text-muted)}
+[data-theme="dark"] .login-divider::before,.login-divider::after{background:var(--border)}
+[data-theme="dark"] .login-dialog-single textarea{background:var(--card);border-color:var(--border);color:var(--text)}
+[data-theme="dark"] .modal{background:rgba(0,0,0,.6)}
+[data-theme="dark"] .modal-box{background:var(--card);border:1px solid rgba(255,255,255,.08)}
+[data-theme="dark"] .detail-grid .dk{color:var(--text-muted)}
+[data-theme="dark"] .dash-table .td{background:#1e2a44;color:#93b4ff}
+[data-theme="dark"] .dash-table .tn{background:#251f3a;color:#c4b5fd}
+[data-theme="dark"] .dash-table .tr{color:#ffb37a}
+[data-theme="dark"] .empty{color:var(--text-muted)}
+[data-theme="dark"] .login-note,.settings-footer-note,.setting-copy,.column-desc{color:var(--text-muted)}
 </style>
 </head>
 <body>
@@ -719,7 +892,7 @@ tr.refunded:hover td:first-child {
 
 <div class="bar">
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;width:100%">
-    <img src="/logo.png" class="bar-logo" alt="logo">
+    <img id="appLogo" src="/logo.png" class="bar-logo" alt="logo">
     <span class="title">美团订单管理</span>
     
     <div style="display:inline-flex;align-items:center;gap:6px">
@@ -738,6 +911,21 @@ tr.refunded:hover td:first-child {
     </div>
     
     <div class="nav-actions">
+      <!-- 主题切换 -->
+      <button class="nav-icon-btn" id="themeToggle" onclick="toggleTheme()" title="切换暗色 / 亮色">
+        <svg class="theme-rot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
+      <!-- 收银台入口 -->
+      <a class="nav-icon-btn" href="/syt" title="收银台" style="text-decoration:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px">
+          <path d="M3 7h18v12H3z"></path>
+          <path d="M3 7l2-3h14l2 3"></path>
+          <path d="M7 11h2M11 11h2M15 11h2"></path>
+          <path d="M7 15h10"></path>
+        </svg>
+      </a>
       <!-- 计费配置 -->
       <button class="nav-icon-btn" onclick="openFeeConfig()" title="计费价配置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px">
@@ -1001,7 +1189,7 @@ tr.refunded:hover td:first-child {
 // 服务费   = 实收金额 × 7%
 // 财务价   = 实收金额 - 服务费
 // 计费价   = 按关键词匹配计费规则
-const API='';
+const API = window.API || '';
 
 let latestDbDate='';
 let refundFilter='normal';
@@ -1205,6 +1393,85 @@ function showToast(msg, type='info') {
   setTimeout(() => {
     toast.remove();
   }, 3000);
+}
+
+// ═══ 主题管理（暗色 / 亮色，localStorage 持久化）═══
+const MOON_SVG='<svg class="theme-rot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>';
+const SUN_SVG='<svg class="theme-rot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><circle cx="12" cy="12" r="4.5"></circle><line x1="12" y1="2" x2="12" y2="5"></line><line x1="12" y1="19" x2="12" y2="22"></line><line x1="2" y1="12" x2="5" y2="12"></line><line x1="19" y1="12" x2="22" y2="12"></line><line x1="4.5" y1="4.5" x2="6.6" y2="6.6"></line><line x1="17.4" y1="17.4" x2="19.5" y2="19.5"></line><line x1="4.5" y1="19.5" x2="6.6" y2="17.4"></line><line x1="17.4" y1="6.6" x2="19.5" y2="4.5"></line></svg>';
+function applyTheme(t){ document.documentElement.setAttribute('data-theme', t); }
+function updateThemeIcon(){
+  const btn=document.getElementById('themeToggle');
+  if(!btn) return;
+  const dark=document.documentElement.getAttribute('data-theme')==='dark';
+  btn.innerHTML = dark ? SUN_SVG : MOON_SVG;
+  btn.title = dark ? '切换到亮色' : '切换到暗色';
+}
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme');
+  const next=cur==='dark'?'light':'dark';
+  try{ localStorage.setItem('theme', next); }catch(e){}
+  applyTheme(next);
+  updateThemeIcon();
+}
+
+// ═══ 数字递增动画 ═══
+function animateValue(el, dur){
+  dur = dur || 700;
+  const to=parseFloat(el.dataset.count)||0;
+  const dec=el.dataset.dec==='1';
+  const t0=performance.now();
+  function fmt(v){ return dec ? v.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}) : Math.round(v).toLocaleString('zh-CN'); }
+  function step(now){
+    const p=Math.min(1,(now-t0)/dur);
+    const e=1-Math.pow(1-p,3); // easeOutCubic
+    el.textContent=fmt(to*e);
+    if(p<1) requestAnimationFrame(step);
+    else el.textContent=fmt(to);
+  }
+  requestAnimationFrame(step);
+}
+function runCountUp(){
+  const els=document.querySelectorAll('#resultInfo [data-count]');
+  if(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches){
+    els.forEach(el=>{ const to=parseFloat(el.dataset.count)||0; el.textContent = el.dataset.dec==='1' ? to.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}) : Math.round(to).toLocaleString('zh-CN'); });
+    return;
+  }
+  els.forEach(el=>animateValue(el));
+}
+
+// ═══ 点击涟漪反馈 ═══
+function createRipple(el, e){
+  const rect=el.getBoundingClientRect();
+  const size=Math.max(rect.width, rect.height);
+  const r=document.createElement('span');
+  r.className='ripple';
+  r.style.width=r.style.height=size+'px';
+  r.style.left=(e.clientX-rect.left)+'px';
+  r.style.top=(e.clientY-rect.top)+'px';
+  el.appendChild(r);
+  setTimeout(()=>{ if(r.parentNode) r.remove(); }, 620);
+}
+function attachRipple(){
+  document.addEventListener('pointerdown', e=>{
+    const t=e.target.closest('.btn,.tag,.nav-icon-btn,#refreshBtn');
+    if(!t||t.disabled) return;
+    createRipple(t, e);
+  });
+}
+
+// ═══ 骨架屏 & 空状态 ═══
+function skeletonRows(n){
+  let h='';
+  const cols=12;
+  for(let i=0;i<(n||8);i++){
+    const w=(38+Math.random()*44).toFixed(1);
+    h+='<tr class="sk-row"><td colspan="'+cols+'"><span class="skeleton" style="width:'+w+'%"></span></td></tr>';
+  }
+  return h;
+}
+const EMPTY_SVG='<svg width="62" height="62" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><path d="M3 9h18"></path><path d="M8 13h8"></path><path d="M8 16h5"></path></svg>';
+function emptyState(title, sub){
+  return '<tr><td colspan="99"><div class="empty-state">'+EMPTY_SVG+'<div class="es-title">'+esc(title)+'</div>'+(sub?'<div class="es-sub">'+esc(sub)+'</div>':'')+'</div></td></tr>';
 }
 
 function setShift(t){
@@ -1687,7 +1954,7 @@ async function query(){
   p.set('limit','5000');
 	  const btn=document.getElementById('queryBtn');
 	  btn.innerHTML='<span class="spin"></span>';
-		  document.getElementById('tbody').innerHTML='<tr><td colspan="99" class="empty">查询中...</td></tr>';
+		  document.getElementById('tbody').innerHTML=skeletonRows(10);
 	  document.getElementById('pager').innerHTML='';
 	  try{
 	    const r=await fetchWithRetry(API+'/api/query?'+p.toString());
@@ -1717,21 +1984,24 @@ async function query(){
 	    }
 	    let info='<div class="stat-capsule-group">';
 	    info+=`<span class="stat-badge stat-badge-time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>`+timeStr+`</span>`;
-	    info+=`<span class="stat-badge stat-badge-total"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>共 `+curTotal+` 单</span>`;
-	    if(colaCount>0) info+=`<span class="stat-badge stat-badge-cola"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><path d="M8 2h8v4H8z"></path><path d="M7 6h10l-1 4H8L7 6z"></path><path d="M8 10h8v10a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V10z"></path><line x1="10" y1="13" x2="10" y2="17"></line><line x1="14" y1="13" x2="14" y2="17"></line></svg>可乐 `+colaCount+`</span>`;
-	    if(refunded>0) info+=`<span class="stat-badge stat-badge-refund"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>退款 `+refunded+`</span>`;
-		    if(sumFee>0 && isColVisible('fee')) info+=`<span class="stat-badge stat-badge-fee"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect><line x1="1" y1="10" x2="23" y2="10"></line></svg>计费 ¥`+sumFee.toLocaleString('zh-CN')+`</span>`;
-		    if(sumFinancial>0 && isColVisible('financial')) info+=`<span class="stat-badge stat-badge-fin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>财务 ¥`+sumFinancial.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})+`</span>`;
-	    info+='</div>';
-	    document.getElementById('resultInfo').innerHTML=info;
-	    document.getElementById('rangeInfo').textContent='';
-	    if(!allRows.length){
-	      document.getElementById('tbody').innerHTML='<tr><td colspan="99" class="empty">无数据</td></tr>';
+	    info+=`<span class="stat-badge stat-badge-total"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>共 <b class="stat-num" data-count="`+curTotal+`" data-dec="0">0</b> 单</span>`;
+	    if(colaCount>0) info+=`<span class="stat-badge stat-badge-cola"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><path d="M8 2h8v4H8z"></path><path d="M7 6h10l-1 4H8L7 6z"></path><path d="M8 10h8v10a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V10z"></path><line x1="10" y1="13" x2="10" y2="17"></line><line x1="14" y1="13" x2="14" y2="17"></line></svg>可乐 <b class="stat-num" data-count="`+colaCount+`" data-dec="0">0</b></span>`;
+	    if(refunded>0) info+=`<span class="stat-badge stat-badge-refund"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>退款 <b class="stat-num" data-count="`+refunded+`" data-dec="0">0</b></span>`;
+		    if(sumFee>0 && isColVisible('fee')) info+=`<span class="stat-badge stat-badge-fee"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect><line x1="1" y1="10" x2="23" y2="10"></line></svg>计费 ¥<b class="stat-num" data-count="`+sumFee+`" data-dec="0">0</b></span>`;
+		    if(sumFinancial>0 && isColVisible('financial')) info+=`<span class="stat-badge stat-badge-fin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>财务 ¥<b class="stat-num" data-count="`+sumFinancial+`" data-dec="1">0</b></span>`;
+    info+='</div>';
+    document.getElementById('resultInfo').innerHTML=info;
+    runCountUp();
+    document.getElementById('rangeInfo').textContent='';
+    if(!allRows.length){
+      document.getElementById('tbody').innerHTML=emptyState('无数据','当前筛选条件下没有订单记录');
     }else{
+      window._animateRows=true;
       renderTable();
+      window._animateRows=false;
     }
   }catch(e){
-    document.getElementById('tbody').innerHTML='<tr><td colspan="99" class="empty">查询失败: '+esc(e.message)+'</td></tr>';
+    document.getElementById('tbody').innerHTML=emptyState('查询失败', e.message);
     showToast('数据查询失败: ' + e.message, 'error');
   }finally{
     btn.textContent='查询';
@@ -1787,7 +2057,9 @@ if(vis('discount_price')) cells.push('<td class="amount">'+(kc?(fdTotal>0?'¥'+f
 	    if(vis('shop_info')) cells.push('<td>'+shopVal+'</td>');
 	    if(vis('fee')) cells.push('<td style="font-weight:600;color:var(--danger)">'+feeText+'</td>');
 	    if(vis('financial')) cells.push('<td class="fin-cell" style="font-family:\'SF Mono\',Consolas,monospace;font-weight:600;color:#c2410c">'+finText+'</td>');
-	    return '<tr class="'+cls+'" data-coupon="'+esc(row.coupon_value||'')+'" onclick="showDetail('+idx+')">'+cells.join('')+'</tr>';
+	    const rowAnim = window._animateRows ? ' row-in' : '';
+    const rowDelay = (window._animateRows && i<24) ? ' style="animation-delay:'+(i*16)+'ms"' : '';
+    return '<tr class="'+cls+rowAnim+'"'+rowDelay+' data-coupon="'+esc(row.coupon_value||'')+'" onclick="showDetail('+idx+')">'+cells.join('')+'</tr>';
 		  }).join('');
 	  // 无限滚动：超过当前页则加载更多
 	  if(curPage*pageSize<allRows.length){
@@ -1927,6 +2199,8 @@ document.querySelectorAll('.filters input').forEach(inp=>{
   inp.addEventListener('keydown',e=>{if(e.key==='Enter')query()});
 });
 
+attachRipple();
+
 document.getElementById('tbody').addEventListener('click',e=>{
   const td=e.target.closest('td.phone');
   if(td){
@@ -1937,6 +2211,8 @@ document.getElementById('tbody').addEventListener('click',e=>{
 });
 
 async function init(){
+  // 初始化主题图标（主题属性已由 <head> 内联脚本提前应用，避免白闪）
+  updateThemeIcon();
   // 初始化计费配置(localStorage不存在或损坏时写入默认)
   if(!localStorage.getItem('feePlans')){
     localStorage.setItem('feePlans', JSON.stringify(DEFAULT_FEE_PLANS));

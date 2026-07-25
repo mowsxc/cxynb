@@ -174,3 +174,9 @@
 *.lz
 *.lzma
 *.iso
+
+# 本地数据/敏感文件（不入库，由部署时本地提供）
+meituan_orders.db
+meituan_cookies.json
+meituan.meta.json
+.master_pwd

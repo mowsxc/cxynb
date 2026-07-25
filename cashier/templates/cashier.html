@@ -174,6 +174,7 @@ td .amt{color:var(--green);font-family:var(--mono);font-weight:600;text-align:ri
       </div>
     </div>
     <div class="header-right">
+      <a class="btn btn-sm" href="/mtdd" title="美团订单管理" style="border:1px solid var(--border2);background:var(--surface2);color:var(--t1)">美团订单</a>
       <span class="pill" id="datePill"></span>
       <span class="pill" id="shiftPill"></span>
       <button class="btn btn-primary btn-sm" onclick="showNewShift()">新建班次</button>
@@ -328,6 +329,12 @@ td .amt{color:var(--green);font-family:var(--mono);font-weight:600;text-align:ri
 </div>
 
 <script>
+const API = (function(){
+  var p = location.pathname || '/';
+  if (p.indexOf('/syt') === 0) return '/syt';
+  if (p.indexOf('/mtdd') === 0) return '/mtdd';
+  return '';
+})();
 let currentShift = null;
 let today = new Date().toISOString().slice(0,10);
 let employees = [];
@@ -338,8 +345,8 @@ document.getElementById('datePill').textContent = today;
 // 加载员工和套餐
 async function loadMeta() {
   const [empR, planR] = await Promise.all([
-    fetch('/api/employees').then(r => r.json()),
-    fetch('/api/fee-plans').then(r => r.json()),
+    fetch(API + '/api/employees').then(r => r.json()),
+    fetch(API + '/api/fee-plans').then(r => r.json()),
   ]);
   employees = empR.employees || [];
   feePlans = planR.fee_plans || [];
@@ -355,12 +362,12 @@ async function loadMeta() {
 loadMeta().then(loadToday);
 
 async function loadToday() {
-  const r = await fetch('/api/shifts/today');
+  const r = await fetch(API + '/api/shifts/today');
   const d = await r.json();
   const shifts = d.shifts || [];
   if (shifts.length === 0) {
     // 今天没班次，加载最近的班次
-    const r2 = await fetch('/api/shifts/latest');
+    const r2 = await fetch(API + '/api/shifts/latest');
     if (r2.ok) {
       const d2 = await r2.json();
       if (d2.shift) { currentShift = d2; renderShift(d2); return; }
@@ -372,7 +379,7 @@ async function loadToday() {
 }
 
 async function loadShift(id) {
-  const r = await fetch('/api/shifts/' + id);
+  const r = await fetch(API + '/api/shifts/' + id);
   const d = await r.json();
   currentShift = d;
   renderShift(d);
@@ -399,7 +406,7 @@ async function createShift() {
     shift_type: document.getElementById('newShiftType').value,
     operator: document.getElementById('newShiftOperator').value,
   };
-  const r = await fetch('/api/shifts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+  const r = await fetch(API + '/api/shifts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
   const d = await r.json();
   hideNewShift();
   currentShift = d.data;
@@ -594,10 +601,10 @@ function renderVersions(versions) {
 
 async function viewVersion(vid) {
   const sid = currentShift.shift.id;
-  const r = await fetch(`/api/shifts/${sid}/versions/${vid}`);
+  const r = await fetch(`${API}/api/shifts/${sid}/versions/${vid}`);
   const d = await r.json();
   if (confirm(`版本 v${d.version.version_num}\n操作: ${d.version.action}\n时间: ${d.version.created_at}\n\n确定恢复到此版本？`)) {
-    const r2 = await fetch(`/api/shifts/${sid}/rollback/${vid}`, {method:'POST'});
+    const r2 = await fetch(`${API}/api/shifts/${sid}/rollback/${vid}`, {method:'POST'});
     const d2 = await r2.json();
     currentShift = d2.data;
     renderShift(d2.data);
@@ -748,7 +755,7 @@ function collectData() {
 async function saveShift() {
   if (!currentShift) return;
   const data = collectData();
-  const r = await fetch(`/api/shifts/${currentShift.shift.id}`, {
+  const r = await fetch(`${API}/api/shifts/${currentShift.shift.id}`, {
     method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)
   });
   const d = await r.json();
@@ -763,7 +770,7 @@ async function closeShift() {
   if (!confirm('确认交班？将自动创建下一班次')) return;
   const data = collectData();
   data.shift.status = 'closed';
-  const r = await fetch(`/api/shifts/${currentShift.shift.id}`, {
+  const r = await fetch(`${API}/api/shifts/${currentShift.shift.id}`, {
     method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)
   });
   if (!r.ok) { toast('交班失败：' + (await r.json()).error, 'err'); return; }
@@ -773,7 +780,7 @@ async function closeShift() {
     const d = new Date(cur.shift_date); d.setDate(d.getDate() + 1);
     nextDate = d.toISOString().slice(0,10); nextType = '白班';
   }
-  const r2 = await fetch('/api/shifts', {
+  const r2 = await fetch(API + '/api/shifts', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({date: nextDate, shift_type: nextType, operator: cur.operator})
   });

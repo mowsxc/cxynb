@@ -1,0 +1,15 @@
+[Unit]
+Description=cxynb 收银台服务 (Python cashier)
+After=network.target
+
+[Service]
+Type=simple
+User=mo
+WorkingDirectory=/opt/cxynb/cashier
+ExecStart=/opt/cxynb/cashier/venv/bin/python app.py
+# app.py 内部绑定 0.0.0.0:5000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
